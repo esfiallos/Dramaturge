@@ -4,14 +4,10 @@ import { resolve }      from 'path';
 
 export default defineConfig({
 
-    // 'mpa' = Multi-Page Application.
-    // Sin esto, Vite usa 'spa' por defecto y cualquier ruta que no conozca
-    // cae de vuelta al index.html raíz — por eso /dev/ cargaba producción.
-    // Con 'mpa', Vite sirve cada HTML por su path real del filesystem.
     appType: 'mpa',
 
     server: {
-        open: '/dev/',  // npm run dev → abre el lab directo
+        open: '/dev/editor.html', // npm run dev → abre el editor
     },
 
     build: {

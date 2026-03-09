@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VEMN · Editor</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        :root {
+            --bg:          #080810;
+            --bg-panel:    #0d0d1a;
+            --bg-line:     #0a0a16;
+            --border:      rgba(201,168,76,0.15);
+            --gold:        #c9a84c;
+            --gold-bright: #e2c47a;
+            --text:        #ede8da;
+            --text-muted:  rgba(237,232,218,0.45);
+            --text-dim:    rgba(237,232,218,0.18);
+            --font-ui:     'Cinzel', Georgia, serif;
+            --font-code:   'JetBrains Mono', 'Fira Code', monospace;
+
+            /* Syntax colors */
+            --syn-keyword: #c9a84c;
+            --syn-string:  #7ec8a0;
+            --syn-actor:   #8fb8e8;
+            --syn-pose:    #b888d8;
+            --syn-slot:    #e8a87c;
+            --syn-vo:      #e8d878;
+            --syn-comment: #4a4a6a;
+            --syn-time:    #e88888;
+            --syn-cond:    #78c8e8;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html, body {
+            width: 100%; height: 100%;
+            background: var(--bg); color: var(--text);
+            font-family: var(--font-code);
+            overflow: hidden;
+        }
+
+        /* ── Header ─────────────────────────────────────────────────────────── */
+        #header {
+            height: 52px;
+            display: flex; align-items: center; gap: 1rem;
+            padding: 0 1.5rem;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .logo {
+            font-family: var(--font-ui); font-size: 0.82rem;
+            letter-spacing: 0.3em; text-transform: uppercase;
+            color: var(--gold);
+        }
+
+        .nav-sep { width: 1px; height: 16px; background: var(--border); }
+        .spacer { flex: 1; }
+
+        /* Filename input */
+        #filename {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
+            color: var(--text); font-family: var(--font-code);
+            font-size: 0.92rem; padding: 0.35rem 0.75rem;
+            outline: none; width: 220px;
+            caret-color: var(--gold);
+            transition: border-color 0.15s;
+        }
+        #filename:focus { border-color: rgba(201,168,76,0.4); }
+
+        /* Nav links */
+        .nav-link {
+            font-family: var(--font-ui); font-size: 0.65rem;
+            letter-spacing: 0.2em; text-transform: uppercase;
+            color: var(--text-muted); text-decoration: none;
+            padding: 0.4rem 0.9rem;
+            border: 1px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
+        }
+        .nav-link:hover { color: var(--text); border-color: var(--border); }
+
+        /* Buttons */
+        .btn {
+            font-family: var(--font-ui); font-size: 0.65rem;
+            letter-spacing: 0.18em; text-transform: uppercase;
+            background: transparent; cursor: pointer;
+            padding: 0.4rem 1rem;
+            transition: color 0.15s, border-color 0.15s, background 0.15s;
+        }
+        .btn-outline {
+            color: var(--text-muted); border: 1px solid var(--border);
+        }
+        .btn-outline:hover { color: var(--text); border-color: rgba(237,232,218,0.3); }
+
+        .btn-run {
+            color: #080810; background: var(--gold);
+            border: 1px solid var(--gold);
+            font-weight: 600; padding: 0.4rem 1.4rem;
+        }
+        .btn-run:hover { background: var(--gold-bright); border-color: var(--gold-bright); }
+
+        /* ── Editor area ─────────────────────────────────────────────────────── */
+        #editor-wrap {
+            display: flex;
+            height: calc(100vh - 52px);
+            overflow: hidden;
+        }
+
+        /* Line numbers */
+        #line-numbers {
+            min-width: 58px; padding: 1.25rem 0.75rem 1.25rem 0;
+            background: var(--bg-line);
+            border-right: 1px solid var(--border);
+            text-align: right;
+            font-size: 0.88rem; line-height: 1.75;
+            color: var(--text-dim);
+            user-select: none;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        /* Code area: textarea + highlight overlay stacked */
+        #code-area {
+            position: relative;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #ems-highlight, #ems-editor {
+            position: absolute; inset: 0;
+            width: 100%; height: 100%;
+            padding: 1.25rem 1.5rem;
+            font-family: var(--font-code);
+            font-size: 0.95rem;
+            line-height: 1.75;
+            tab-size: 4;
+            white-space: pre;
+            word-wrap: normal;
+            overflow: auto;
+            border: none; outline: none; resize: none;
+            letter-spacing: 0.01em;
+        }
+
+        /* El highlight vive ENCIMA del textarea.
+           El textarea es invisible pero captura el input.
+           El highlight muestra el texto coloreado. */
+        #ems-highlight {
+            pointer-events: none;
+            background: transparent;
+            z-index: 2;
+            color: var(--text); /* fallback visible */
+        }
+
+        .hl-line { display: block; min-height: 1.75em; }
+
+        #ems-editor {
+            background: var(--bg);
+            z-index: 1;
+            /* Texto del textarea invisible — solo el caret se ve */
+            color: transparent;
+            -webkit-text-fill-color: transparent;
+            caret-color: var(--gold-bright);
+        }
+
+        /* Status bar */
+        #statusbar {
+            position: fixed; bottom: 0; right: 0;
+            padding: 0.3rem 1.25rem;
+            font-size: 0.75rem; color: var(--text-dim);
+            font-family: var(--font-code);
+            background: var(--bg-panel);
+            border-top: 1px solid var(--border);
+            border-left: 1px solid var(--border);
+        }
+
+        /* ── Syntax token colors ─────────────────────────────────────────────── */
+        .syn-keyword { color: var(--syn-keyword); }
+        .syn-string  { color: var(--syn-string);  }
+        .syn-actor   { color: var(--syn-actor);   }
+        .syn-pose    { color: var(--syn-pose);    }
+        .syn-slot    { color: var(--syn-slot);    }
+        .syn-vo      { color: var(--syn-vo);      }
+        .syn-comment { color: var(--syn-comment); font-style: italic; }
+        .syn-time    { color: var(--syn-time);    }
+        .syn-cond    { color: var(--syn-cond);    }
+        .syn-flag    { color: var(--syn-pose);    }
+        .syn-op      { color: var(--text-muted);  }
+        .syn-bool    { color: var(--syn-cond);    }
+
+        /* Saved indicator */
+        #saved-badge {
+            font-family: var(--font-ui); font-size: 0.5rem;
+            letter-spacing: 0.2em; text-transform: uppercase;
+            color: #7ec8a0; opacity: 0;
+            transition: opacity 0.4s;
+        }
+        #saved-badge.show { opacity: 1; }
+    </style>
+</head>
+<body>
+
+    <div id="header">
+        <span class="logo">VEMN</span>
+        <div class="nav-sep"></div>
+        <input id="filename" type="text" value="scene_01" spellcheck="false"
+               title="Nombre del archivo (sin .ems)">
+        <span id="saved-badge">✓ Guardado</span>
+        <div class="spacer"></div>
+
+        <a class="nav-link" href="/dev/characters.html" target="_blank">Personajes</a>
+        <a class="nav-link" href="/dev/debug.html" target="_blank">Debug</a>
+        <div class="nav-sep"></div>
+
+        <label class="btn btn-outline" title="Cargar archivo .ems">
+            ↑ Abrir
+            <input id="load-file" type="file" accept=".ems" style="display:none">
+        </label>
+        <button class="btn btn-outline" id="btn-save" title="Guardar como .ems">↓ Guardar</button>
+        <div class="nav-sep"></div>
+        <button class="btn btn-run" id="btn-run">▶ Run</button>
+    </div>
+
+    <div id="editor-wrap">
+        <div id="line-numbers"></div>
+        <div id="code-area">
+            <div id="ems-highlight" aria-hidden="true"></div>
+            <textarea id="ems-editor" spellcheck="false" autocomplete="off"
+                      autocorrect="off" autocapitalize="off"
+                      placeholder="# Escribe tu script .ems aquí..."></textarea>
+        </div>
+    </div>
+
+    <div id="statusbar">
+        <span id="status-pos">Ln 1, Col 1</span>
+        &nbsp;·&nbsp;
+        <span id="status-count">0 instrucciones</span>
+    </div>
+
+    <script type="module" src="./editor.js"></script>
+</body>
+</html>
