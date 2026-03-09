@@ -7,4 +7,11 @@ audio.bgm play[track_01] vol:0.4
 show valeria:neutral at left fade
 
 valeria:neutral "Este es el primer diálogo real del engine."
-valeria:neutral "Si ves esto, todo funciona."
+valeria:neutral "bueno.........."
+
+show valeria:neutral at right fade
+valeria:triste "Si ves esto, todo funciona."
+
+valeria:triste "Probando" [001]
+
+valeria:neutral "x + y = pes."

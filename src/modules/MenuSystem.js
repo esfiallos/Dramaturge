@@ -1,31 +1,41 @@
 // src/modules/MenuSystem.js
 //
-// RESPONSABILIDADES:
-//   - Splash screen / Menú principal
-//   - Menú de pausa (ESC o botón HUD)
-//   - Panel de ajustes de audio
-//   - Selector de slots (guardar / cargar)
-//   - Exportar / importar partida
+// ARQUITECTURA — Máquina de estados + paneles flotantes
 //
-// INYECCIÓN (en main.js):
-//   const menu = new MenuSystem({ engine, saveManager, sceneManager, audio });
-//   await menu.init();  ← muestra el menú principal
+// ESTADOS:
+//   MAIN_MENU → LOADING → IN_GAME ↔ PAUSED
+//
+// REGLA DE ORO:
+//   Solo #main-menu, #hud y #pause-menu viven en index.html.
+//   Todos los paneles secundarios (slots, ajustes, audio, modal, toast, loading)
+//   son creados por MenuSystem y appended directamente a document.body.
+//   Así son independientes de la jerarquía del DOM y siempre visibles.
+//
+// BOTONES:
+//   Menú principal  → "Continuar"      = abre slot-panel (load)
+//                  → "Cargar Partida"  = abre slot-panel (load)  [alias de Continuar]
+//                  → "Nueva Partida"   = empieza desde cero
+//   Pausa           → "Continuar"      = cierra la pausa, vuelve al juego
+//                  → "Guardar"         = abre slot-panel (save)
+//                  → "Cargar"          = abre slot-panel (load)
+//                  → "Ajustes"         = abre panel de ajustes
+//                  → "Menú Principal"  = modal de confirmación → MAIN_MENU
+//   HUD             → "Guardar"        = quicksave a slot_1
+//                  → "Pausa"           = abre pausa
+//                  → "Salir"           = autosave + MAIN_MENU directo
 
 export class MenuSystem {
 
-    /**
-     * @param {object} deps
-     * @param {Dramaturge}  deps.engine
-     * @param {SaveManager}  deps.saveManager
-     * @param {SceneManager} deps.sceneManager
-     * @param {Audio}      deps.audio
-     * @param {string}       deps.startScene   - Escena inicial (ej: 'cap01/scene_01')
-     * @param {string}       deps.gameTitle     - Título del juego
-     * @param {string}       deps.gameSubtitle  - Subtítulo / tagline
-     */
+    static STATES = {
+        MAIN_MENU: 'MAIN_MENU',
+        LOADING:   'LOADING',
+        IN_GAME:   'IN_GAME',
+        PAUSED:    'PAUSED',
+    };
+
     constructor({ engine, saveManager, sceneManager, audio,
-                  startScene = 'cap01/scene_01',
-                  gameTitle  = 'EMERS',
+                  startScene   = 'cap01/scene_01',
+                  gameTitle    = 'DRAMATURGE',
                   gameSubtitle = 'Novela Visual' }) {
 
         this.engine       = engine;
@@ -36,151 +46,300 @@ export class MenuSystem {
         this.gameTitle    = gameTitle;
         this.gameSubtitle = gameSubtitle;
 
-        this._slotMode    = 'load'; // 'load' | 'save'
-        this._busy        = false;  // guarda contra re-entrada en acciones de menú
-        this._panelOpen   = false;  // true mientras audio/slots están abiertos
-
-        // Caché precargada durante init() — los paneles muestran datos ya listos
-        this._cachedSaves = {};     // { autosave, slot_1, slot_2, slot_3 }
-        this._autosave    = null;   // GameState | null
-
-        // Referencias DOM — pobladas en init()
-        this._els = {};
+        this._state      = null;
+        this._busy       = false;
+        this._saves      = {};
+        this._autosave   = null;
+        this._savesReady = null;
+        this._els        = {};
+        this._toastTimer = null;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // INICIALIZACIÓN
+    // INIT
     // ─────────────────────────────────────────────────────────────────────────
 
     async init() {
-        this._bindEls();
+        this._bindStaticEls();  // elementos que existen en index.html
+        this._buildPanels();    // paneles creados dinámicamente en body
         this._populateMenu();
-
-        // Precargar todos los saves ANTES de mostrar el menú.
-        // Así los paneles de slots y "Continuar" son instantáneos.
-        await this._preloadSaves();
-
         this._bindEvents();
-        this._showMainMenu();
+        this._setState(MenuSystem.STATES.MAIN_MENU);
+        this._savesReady = this._loadSaves();
     }
 
-    /**
-     * Carga todos los slots desde Dexie y los guarda en caché.
-     * Se llama una vez en init() y cada vez que se guarda/carga una partida.
-     */
-    async _preloadSaves() {
-        const SLOTS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
-        await Promise.all(SLOTS.map(async (slotId) => {
-            this._cachedSaves[slotId] = await this.saveManager.load(slotId);
-        }));
-        this._autosave = this._cachedSaves['autosave'];
+    // ─────────────────────────────────────────────────────────────────────────
+    // MÁQUINA DE ESTADOS
+    // ─────────────────────────────────────────────────────────────────────────
 
-        // Actualizar estado del botón "Continuar"
-        if (this._els.btnContinue) {
-            this._els.btnContinue.disabled = !this._autosave;
+    _setState(newState) {
+        this._state = newState;
+        const S = MenuSystem.STATES;
+
+        // Ocultar absolutamente todo
+        this._els.mainMenu?.classList.add('hidden');
+        this._els.hud?.classList.remove('visible');
+        this._els.pauseMenu?.classList.remove('visible');
+        this._closeAllPanels();
+        this.engine.isBlocked = false;
+
+        switch (newState) {
+            case S.MAIN_MENU:
+                this._els.mainMenu?.classList.remove('hidden');
+                this._stopHUDClock();
+                this._updateMainMenuButtons();
+                break;
+
+            case S.LOADING:
+                // El loading overlay se maneja con _showLoading/_hideLoading
+                break;
+
+            case S.IN_GAME:
+                this._els.hud?.classList.add('visible');
+                this._updateHUDInfo();
+                this._startHUDClock();
+                break;
+
+            case S.PAUSED:
+                this._els.hud?.classList.add('visible');
+                this._els.pauseMenu?.classList.add('visible');
+                this.engine.isBlocked = true;
+                break;
         }
     }
 
-    _bindEls() {
-        const $ = (id) => document.getElementById(id);
+    // ─────────────────────────────────────────────────────────────────────────
+    // BIND DOM — solo los elementos que DEBEN estar en index.html
+    // ─────────────────────────────────────────────────────────────────────────
 
+    _bindStaticEls() {
+        const $ = (id) => document.getElementById(id);
         this._els = {
-            // Menú principal
+            // Menú principal (en index.html)
             mainMenu:    $('main-menu'),
             menuTitle:   $('menu-title'),
             menuSub:     $('menu-subtitle'),
             btnNew:      $('btn-new-game'),
-            btnContinue: $('btn-continue'),
             btnLoad:     $('btn-load'),
-            btnAudio:    $('btn-audio-main'),
-            // HUD en juego
-            hud:         $('hud'),
-            btnSave:     $('btn-save'),
-            btnPause:    $('btn-pause'),
-            btnExit:     $('btn-exit'),
 
-            // Pausa
-            pauseMenu:   $('pause-menu'),
-            btnResume:   $('btn-resume'),
-            btnSaveSlot: $('btn-save-slot'),
-            btnLoadSlot: $('btn-load-slot'),
-            btnAudioP:   $('btn-audio-pause'),
-            btnExportP:  $('btn-export-pause'),
-            btnImportP:  $('btn-import-pause'),
-            btnMainMenu: $('btn-main-menu'),
+            // HUD (en index.html)
+            hud:      $('hud'),
+            btnSave:  $('btn-save'),
+            btnPause: $('btn-pause'),
+            btnExit:      $('btn-exit'),
+            hudTitle:     $('hud-title'),
+            hudScene:     $('hud-scene'),
+            hudPlaytime:  $('hud-playtime'),
 
-            // Audio
-            audioPanel:  $('audio-panel'),
-            sliderBGM:   $('slider-bgm'),
-            sliderSE:    $('slider-se'),
-            sliderVoice: $('slider-voice'),
-            btnAudioBack:$('btn-audio-back'),
-
-            // Slots
-            slotPanel:   $('slot-panel'),
-            slotTitle:   $('slot-panel-title'),
-            slotList:    $('slot-list'),
-            btnSlotBack: $('btn-slot-back'),
+            // Menú de pausa (en index.html)
+            pauseMenu:    $('pause-menu'),
+            btnResume:    $('btn-resume'),
+            btnSaveSlot:  $('btn-save-slot'),
+            btnLoadSlot:  $('btn-load-slot'),
+            btnSettings:  $('btn-settings'),
+            btnMainMenu:  $('btn-main-menu'),
         };
     }
 
-    _populateMenu() {
-        if (this._els.menuTitle)  this._els.menuTitle.textContent  = this.gameTitle;
-        if (this._els.menuSub)    this._els.menuSub.textContent    = this.gameSubtitle;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HUD INFO
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _updateHUDInfo() {
+        if (this._els.hudTitle)
+            this._els.hudTitle.textContent = this.gameTitle;
+
+        const file = this.engine.state.currentFile ?? '';
+        // "cap01/scene_02.dan" → "Cap 01 · Escena 02"
+        const parts = file.replace('.dan', '').split('/');
+        const sceneLabel = parts
+            .map(p => p.replace(/_/g, ' ').replace(/\w/g, l => l.toUpperCase()))
+            .join(' · ');
+        if (this._els.hudScene)
+            this._els.hudScene.textContent = sceneLabel;
+    }
+
+    _startHUDClock() {
+        this._stopHUDClock();
+        this._hudClockInterval = setInterval(() => {
+            if (this._state !== MenuSystem.STATES.IN_GAME) return;
+            const total = (this.engine.state.playTime ?? 0) +
+                Math.floor((Date.now() - (this.engine._sessionStart ?? Date.now())) / 1000);
+            const h = Math.floor(total / 3600);
+            const m = Math.floor((total % 3600) / 60).toString().padStart(2, '0');
+            const s = (total % 60).toString().padStart(2, '0');
+            const label = h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
+            if (this._els.hudPlaytime)
+                this._els.hudPlaytime.textContent = label;
+        }, 1000);
+    }
+
+    _stopHUDClock() {
+        clearInterval(this._hudClockInterval);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BUILD PANELS — creados en document.body, independientes del DOM
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _buildPanels() {
+        this._buildSlotPanel();
+        this._buildAudioPanel();
+        this._buildModal();
+        this._buildLoadingOverlay();
+        this._buildToast();
+    }
+
+    _buildSlotPanel() {
+        const el = this._createPanel('dm-slot-panel', `
+            <div class="dm-panel__inner">
+                <h2 class="dm-panel__title" id="dm-slot-title">— Cargar Partida —</h2>
+                <div class="dm-slot-list" id="dm-slot-list"></div>
+                <button class="btn-gold dm-panel__back" id="dm-slot-back">← Volver</button>
+            </div>
+        `);
+        this._els.slotPanel  = el;
+        this._els.slotTitle  = document.getElementById('dm-slot-title');
+        this._els.slotList   = document.getElementById('dm-slot-list');
+        document.getElementById('dm-slot-back')
+            ?.addEventListener('click', () => this._closeSlotPanel());
     }
 
 
+    _buildAudioPanel() {
+        const el = this._createPanel('dm-audio-panel', `
+            <div class="dm-panel__inner">
+                <h2 class="dm-panel__title">— Audio —</h2>
+                <div class="dm-audio-row">
+                    <label>Música</label>
+                    <input type="range" id="dm-slider-bgm" min="0" max="100" value="50">
+                </div>
+                <div class="dm-audio-row">
+                    <label>Efectos</label>
+                    <input type="range" id="dm-slider-se" min="0" max="100" value="80">
+                </div>
+                <div class="dm-audio-row">
+                    <label>Voces</label>
+                    <input type="range" id="dm-slider-voice" min="0" max="100" value="100">
+                </div>
+                <button class="btn-gold dm-panel__back" id="dm-audio-back">← Volver</button>
+            </div>
+        `);
+        this._els.audioPanel   = el;
+        this._els.sliderBGM    = document.getElementById('dm-slider-bgm');
+        this._els.sliderSE     = document.getElementById('dm-slider-se');
+        this._els.sliderVoice  = document.getElementById('dm-slider-voice');
 
-    _bindEvents() {
-        const on = (el, ev, fn) => el?.addEventListener(ev, fn);
-
-        // ── Menú principal ────────────────────────────────────────────────────
-        on(this._els.btnNew,      'click', () => this._newGame());
-        on(this._els.btnContinue, 'click', () => this._continueGame());
-        on(this._els.btnLoad,     'click', () => { if (!this._busy && !this._panelOpen) this._openSlots('load'); });
-        // ── HUD ───────────────────────────────────────────────────────────────
-        on(this._els.btnSave,  'click', () => this._quickSave());
-        on(this._els.btnPause, 'click', () => this._openPause());
-        on(this._els.btnExit,  'click', () => this._exitToMenu());
-
-        // ── Pausa ─────────────────────────────────────────────────────────────
-        on(this._els.btnResume,   'click', () => this._closePause());
-        on(this._els.btnSaveSlot, 'click', () => { if (!this._busy && !this._panelOpen) this._openSlots('save'); });
-        on(this._els.btnLoadSlot, 'click', () => { if (!this._busy && !this._panelOpen) this._openSlots('load'); });
-        on(this._els.btnAudioP,   'click', () => { if (!this._busy && !this._panelOpen) this._openAudio(); });
-        on(this._els.btnExportP,  'click', () => this._export());
-        on(this._els.btnImportP,  'click', () => this._import());
-        on(this._els.btnMainMenu, 'click', () => { if (!this._busy) this._exitToMenu(); });
-
-        // ── Audio ─────────────────────────────────────────────────────────────
-        on(this._els.sliderBGM, 'input', (e) => {
+        this._els.sliderBGM?.addEventListener('input', (e) => {
             const v = e.target.value / 100;
             this.audio.setVolume('bgm', v);
             this.engine.state.audioSettings.bgmVolume = v;
         });
-        on(this._els.sliderSE, 'input', (e) => {
+        this._els.sliderSE?.addEventListener('input', (e) => {
             const v = e.target.value / 100;
             this.audio.setVolume('se', v);
             this.engine.state.audioSettings.sfxVolume = v;
         });
-        on(this._els.sliderVoice, 'input', (e) => {
+        this._els.sliderVoice?.addEventListener('input', (e) => {
             const v = e.target.value / 100;
             this.audio.setVolume('voice', v);
             this.engine.state.audioSettings.voiceVolume = v;
         });
-        on(this._els.btnAudioBack, 'click', () => this._closeAudio());
+        document.getElementById('dm-audio-back')?.addEventListener('click', () => {
+            this._closeAudio();
+            this.saveManager.save(this.engine.state, 'autosave').catch(() => {});
+        });
+    }
 
-        // ── Slots ─────────────────────────────────────────────────────────────
-        on(this._els.btnSlotBack, 'click', () => this._closeSlots());
+    _buildModal() {
+        if (document.getElementById('dm-modal')) return;
+        const el = document.createElement('div');
+        el.id = 'dm-modal';
+        el.className = 'dm-overlay dm-modal dm-hidden';
+        el.innerHTML = `
+            <div class="dm-modal__box">
+                <p class="dm-modal__msg" id="dm-modal-msg"></p>
+                <div class="dm-modal__actions">
+                    <button class="btn-gold" id="dm-modal-confirm"></button>
+                    <button class="btn-gold" id="dm-modal-cancel"></button>
+                </div>
+            </div>`;
+        document.body.appendChild(el);
+        this._els.modal        = el;
+        this._els.modalMsg     = document.getElementById('dm-modal-msg');
+        this._els.modalConfirm = document.getElementById('dm-modal-confirm');
+        this._els.modalCancel  = document.getElementById('dm-modal-cancel');
+    }
 
-        // ── ESC key ───────────────────────────────────────────────────────────
+    _buildLoadingOverlay() {
+        if (document.getElementById('dm-loading')) return;
+        const el = document.createElement('div');
+        el.id = 'dm-loading';
+        el.className = 'dm-overlay dm-loading dm-hidden';
+        el.innerHTML = `<span id="dm-loading-msg">Cargando...</span>`;
+        document.body.appendChild(el);
+        this._els.loadingOverlay = el;
+        this._els.loadingMsg     = document.getElementById('dm-loading-msg');
+    }
+
+    _buildToast() {
+        if (document.getElementById('dm-toast')) return;
+        const el = document.createElement('div');
+        el.id = 'dm-toast';
+        el.className = 'dm-toast dm-hidden';
+        document.body.appendChild(el);
+        this._els.toast = el;
+    }
+
+    /** Helper: crea un panel flotante vacío, lo appenda a body y lo devuelve. */
+    _createPanel(id, innerHTML) {
+        if (document.getElementById(id)) return document.getElementById(id);
+        const el = document.createElement('div');
+        el.id = id;
+        el.className = 'dm-overlay dm-panel dm-hidden';
+        el.innerHTML = innerHTML;
+        document.body.appendChild(el);
+        return el;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EVENTS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _populateMenu() {
+        if (this._els.menuTitle) this._els.menuTitle.textContent = this.gameTitle;
+        if (this._els.menuSub)   this._els.menuSub.textContent   = this.gameSubtitle;
+    }
+
+    _bindEvents() {
+        const on = (el, ev, fn) => el?.addEventListener(ev, fn);
+        const S  = MenuSystem.STATES;
+
+        // ── Menú principal ────────────────────────────────────────────────────
+        on(this._els.btnNew,      'click', () => this._actionNewGame());
+        // "Continuar" y "Cargar Partida" en menú principal: ambos abren slots (load)
+        on(this._els.btnLoad,     'click', () => this._actionOpenSlots('load'));
+
+        // ── HUD ───────────────────────────────────────────────────────────────
+        on(this._els.btnSave,  'click', () => this._actionQuickSave());
+        on(this._els.btnPause, 'click', () => {
+            if (this._state === S.IN_GAME) this._setState(S.PAUSED);
+        });
+        on(this._els.btnExit, 'click', () => this._actionExitDirect());
+
+        // ── Pausa ─────────────────────────────────────────────────────────────
+        on(this._els.btnResume, 'click', () => {
+            if (this._state === S.PAUSED) this._setState(S.IN_GAME);
+        });
+        on(this._els.btnSaveSlot,  'click', () => this._actionOpenSlots('save'));
+        on(this._els.btnLoadSlot,  'click', () => this._actionOpenSlots('load'));
+        on(this._els.btnSettings,  'click', () => this._openAudio()); // Ajustes = Audio
+        on(this._els.btnMainMenu,  'click', () => this._actionExitConfirm());
+
+        // ── ESC ───────────────────────────────────────────────────────────────
         document.addEventListener('keydown', (e) => {
-            if (e.key !== 'Escape') return;
-            if (this._isMenuVisible())   return;
-            if (this._isAudioVisible())  { this._closeAudio();  return; }
-            if (this._isSlotsVisible())  { this._closeSlots();  return; }
-            if (this._isPauseVisible())  { this._closePause();  return; }
-            this._openPause();
+            if (e.key === 'Escape') this._handleEsc();
         });
     }
 
@@ -188,121 +347,104 @@ export class MenuSystem {
     // ACCIONES
     // ─────────────────────────────────────────────────────────────────────────
 
-    async _newGame() {
+    async _actionNewGame() {
         if (this._busy) return;
-        this._busy = true;           // inmediato — antes de cualquier await
-        this._disableMenuButtons();
-        this._hideMainMenu();
-        this._showHUD();
-        this.audio.unlock?.();
-        await this.sceneManager.start(this.startScene);
-        this._busy = false;
-    }
-
-    async _continueGame() {
-        if (this._busy || !this._autosave) return;
         this._busy = true;
-        this._disableMenuButtons();
 
-        this._hideMainMenu();
-        this._showHUD();
+        // 1. Mostrar loading ANTES de cambiar estado — el canvas aún no tiene escena
+        this._showLoading('Iniciando...');
         this.audio.unlock?.();
 
-        // Usar el autosave ya precargado — sin queries a Dexie en el clic
-        const target = this._autosave.currentFile.replace('.dan', '');
-        const ok = await this.sceneManager.loadOnly(target);
-        if (ok) {
-            await this.engine.resumeFromState(this._autosave);
-            await this.engine.next();
+        // 2. Cargar todos los assets / escena
+        await this.sceneManager.start(this.startScene);
+
+        // 3. Ahora que el canvas tiene contenido, hacer transición de entrada
+        this._hideLoading();
+        this._setState(MenuSystem.STATES.IN_GAME);
+
+        // 4. Fade-in del renderer si está disponible (da tiempo a PixiJS a renderizar)
+        if (this.engine.renderer?.fadeIn) {
+            await this.engine.renderer.fadeIn(400);
         }
+
         this._busy = false;
     }
 
-    _quickSave() {
-        this.engine.saveToSlot('slot_1').then(() => {
-            this._flashHUDSave();
+async _actionOpenSlots(mode) {
+        if (this._busy) return;
+        // Esperar saves si aún están cargando
+        if (this._savesReady) await this._savesReady;
+        this._openSlotPanel(mode);
+    }
+
+    _actionQuickSave() {
+        const S = MenuSystem.STATES;
+        if (this._state !== S.IN_GAME && this._state !== S.PAUSED) return;
+        this.engine.saveToSlot('slot_1').then(async () => {
+            await this._loadSaves();
+            this._toast('Partida guardada en Ranura 1');
+        }).catch(() => this._toast('Error al guardar'));
+    }
+
+    async _actionExitDirect() {
+        if (this._busy) return;
+        this._busy = true;
+        await this.engine.saveToSlot('autosave').catch(() => {});
+        this._doExitToMenu();
+        this._busy = false;
+    }
+
+    _actionExitConfirm() {
+        this._showModal({
+            message:      '¿Volver al menú principal?\nEl progreso no guardado se perderá.',
+            confirmLabel: 'Salir',
+            cancelLabel:  'Cancelar',
+            onConfirm:    () => this._doExitToMenu(),
         });
     }
 
-    _export() {
-        this.engine.exportSave();
-    }
-
-    async _import() {
-        const loaded = await this.saveManager.importFromFile();
-        if (!loaded) return;
-        this._hideMainMenu();
-        this._closePause();
-        this._showHUD();
-        await this.sceneManager.start(loaded.currentFile.replace('.dan', ''));
-        await this.engine.resumeFromState(loaded);
-    }
-
-    _exitToMenu() {
+    _doExitToMenu() {
         this.audio.stopBGM(500);
-        this._closePause();
-        this._hideHUD();
-        this._showMainMenu();
-        this._enableMenuButtons();
-        // Refrescar caché por si hay un nuevo autosave
-        this._preloadSaves();
+        this._setState(MenuSystem.STATES.MAIN_MENU);
+        this._savesReady = this._loadSaves();
     }
 
+
     // ─────────────────────────────────────────────────────────────────────────
-    // PANEL DE AUDIO
+    // PANEL DE SLOTS
     // ─────────────────────────────────────────────────────────────────────────
 
-    _openAudio() {
-        this._panelOpen = true;
-        // Sincronizar sliders con el state actual
-        const s = this.engine.state.audioSettings;
-        if (this._els.sliderBGM)   this._els.sliderBGM.value   = Math.round(s.bgmVolume   * 100);
-        if (this._els.sliderSE)    this._els.sliderSE.value    = Math.round(s.sfxVolume   * 100);
-        if (this._els.sliderVoice) this._els.sliderVoice.value = Math.round(s.voiceVolume * 100);
-
-        this._els.audioPanel?.classList.add('visible');
+    async _actionDeleteSlot(slotId, slotName) {
+        const ok = await this._confirmModal(
+            `¿Eliminar ${slotName}? Esta acción no se puede deshacer.`,
+            'Eliminar', 'Cancelar'
+        );
+        if (!ok) return;
+        await this.saveManager.deleteSlot(slotId);
+        await this._loadSaves();
+        // Re-renderizar con los datos frescos
+        this._renderSlots(this._slotMode);
+        this._toast(`${slotName} eliminada`);
     }
 
-    _closeAudio() {
-        this._panelOpen = false;
-        this._els.audioPanel?.classList.remove('visible');
-        // Persistir los ajustes de audio
-        this.saveManager.save(this.engine.state, 'autosave').catch(() => {});
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // SELECTOR DE SLOTS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _openSlots(mode) {
-        this._slotMode  = mode;
-        this._panelOpen = true;
-
+    _openSlotPanel(mode) {
         if (this._els.slotTitle) {
             this._els.slotTitle.textContent = mode === 'save'
-                ? 'Guardar Partida'
-                : 'Cargar Partida';
+                ? '— Guardar Partida —'
+                : '— Cargar Partida —';
         }
-
-        // _renderSlots es síncrono (usa caché) — panel e items aparecen juntos
         this._renderSlots(mode);
-        this._els.slotPanel?.classList.add('visible');
+        this._els.slotPanel?.classList.remove('dm-hidden');
     }
 
-    _closeSlots() {
-        this._panelOpen = false;
-        this._els.slotPanel?.classList.remove('visible');
+    _closeSlotPanel() {
+        this._els.slotPanel?.classList.add('dm-hidden');
     }
 
-    /**
-     * Renderiza los slots usando la caché — sin queries a Dexie.
-     * La caché se refresca después de guardar o cargar.
-     */
     _renderSlots(mode) {
         if (!this._els.slotList) return;
-
-        const SLOTS      = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
-        const SLOT_NAMES = {
+        const SLOTS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
+        const NAMES = {
             autosave: 'Autoguardado',
             slot_1:   'Ranura 1',
             slot_2:   'Ranura 2',
@@ -314,96 +456,187 @@ export class MenuSystem {
         for (const slotId of SLOTS) {
             if (mode === 'save' && slotId === 'autosave') continue;
 
-            const data = this._cachedSaves[slotId]; // ← caché, sin await
+            const data = this._saves[slotId];
             const item = document.createElement('div');
-            item.className = `slot-item ${data ? '' : 'slot-item--empty'}`;
+            item.className = `dm-slot-item${data ? '' : ' dm-slot-item--empty'}`;
 
             const date = data?.savedAt
                 ? new Date(data.savedAt).toLocaleDateString('es', {
                     day: '2-digit', month: 'short', year: 'numeric',
-                    hour: '2-digit', minute: '2-digit'
-                  })
+                    hour: '2-digit', minute: '2-digit' })
                 : 'Vacío';
 
-            item.innerHTML = `
-                <span class="slot-name">${SLOT_NAMES[slotId]}</span>
-                <span class="slot-meta">${date}</span>
-            `;
+            // Botón eliminar — solo en slots con datos
+            const deleteBtn = data ? `<button class="dm-slot-delete" title="Eliminar">✕</button>` : '';
 
-            item.addEventListener('click', async () => {
-                if (mode === 'save') {
-                    await this.engine.saveToSlot(slotId);
-                    // Refrescar caché tras guardar
-                    await this._preloadSaves();
-                    this._closeSlots();
-                } else {
-                    if (!data) return;
-                    this._closeSlots();
-                    this._closePause();
-                    const target = data.currentFile.replace('.dan', '');
-                    const ok = await this.sceneManager.loadOnly(target);
-                    if (ok) {
-                        await this.engine.resumeFromState(data);
-                        await this.engine.next();
-                    }
-                    // Refrescar caché tras cargar
-                    await this._preloadSaves();
-                }
+            item.innerHTML = `
+                <span class="dm-slot-name">${NAMES[slotId]}</span>
+                <span class="dm-slot-meta">${date}</span>
+                ${deleteBtn}`;
+
+            // Clic en botón eliminar (no propaga al item)
+            item.querySelector('.dm-slot-delete')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._actionDeleteSlot(slotId, NAMES[slotId]);
             });
+
+            item.addEventListener('click', () =>
+                this._onSlotClick(mode, slotId, NAMES[slotId], data));
 
             this._els.slotList.appendChild(item);
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PAUSA
-    // ─────────────────────────────────────────────────────────────────────────
+    async _onSlotClick(mode, slotId, slotName, data) {
+        if (mode === 'save') {
+            if (data) {
+                const ok = await this._confirmModal(
+                    `¿Sobrescribir ${slotName}?`, 'Guardar', 'Cancelar');
+                if (!ok) return;
+            }
+            await this.engine.saveToSlot(slotId);
+            await this._loadSaves();
+            this._closeSlotPanel();
+            this._toast('Partida guardada');
 
-    _openPause() {
-        this.engine.isBlocked = true;
-        this._els.pauseMenu?.classList.add('visible');
+        } else {
+            if (!data) return;
+            this._closeAllPanels();
+            this._busy = true;
+            this._showLoading('Cargando partida...');
+            this.audio.unlock?.();
+
+            const target = data.currentFile.replace('.dan', '');
+            const ok = await this.sceneManager.loadOnly(target);
+            if (ok) {
+                await this.engine.resumeFromState(data);
+                await this.engine.next();
+            }
+
+            this._hideLoading();
+            this._setState(MenuSystem.STATES.IN_GAME);
+            if (this.engine.renderer?.fadeIn) await this.engine.renderer.fadeIn(400);
+            this._busy = false;
+        }
     }
 
-    _closePause() {
-        this._els.pauseMenu?.classList.remove('visible');
-        this.engine.isBlocked = false;
+    // ─────────────────────────────────────────────────────────────────────────
+    // PANELES SECUNDARIOS
+    // ─────────────────────────────────────────────────────────────────────────
+
+
+    _openAudio() {
+        const s = this.engine.state.audioSettings;
+        if (this._els.sliderBGM)   this._els.sliderBGM.value   = Math.round(s.bgmVolume   * 100);
+        if (this._els.sliderSE)    this._els.sliderSE.value    = Math.round(s.sfxVolume   * 100);
+        if (this._els.sliderVoice) this._els.sliderVoice.value = Math.round(s.voiceVolume * 100);
+        this._els.audioPanel?.classList.remove('dm-hidden');
+    }
+    _closeAudio() {
+        this._els.audioPanel?.classList.add('dm-hidden');
+    }
+
+    _closeAllPanels() {
+        this._closeSlotPanel();
+        this._closeAudio();
+        this._closeModal();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // VISIBILIDAD
+    // ESC
     // ─────────────────────────────────────────────────────────────────────────
 
-    _showMainMenu()  { this._els.mainMenu?.classList.remove('hidden'); }
-    _hideMainMenu()  { this._els.mainMenu?.classList.add('hidden'); }
-    _showHUD()       { this._els.hud?.classList.add('visible'); }
-    _hideHUD()       { this._els.hud?.classList.remove('visible'); }
+    _handleEsc() {
+        const S = MenuSystem.STATES;
+        if (this._state === S.MAIN_MENU || this._state === S.LOADING) return;
 
-    _isMenuVisible()  { return !this._els.mainMenu?.classList.contains('hidden'); }
-    _isPauseVisible() { return this._els.pauseMenu?.classList.contains('visible'); }
-    _isAudioVisible() { return this._els.audioPanel?.classList.contains('visible'); }
-    _isSlotsVisible() { return this._els.slotPanel?.classList.contains('visible'); }
+        if (this._isModalOpen())                                                  { this._closeModal();     return; }
+        if (!this._els.audioPanel?.classList.contains('dm-hidden'))              { this._closeAudio();     return; }
+        if (!this._els.slotPanel?.classList.contains('dm-hidden'))               { this._closeSlotPanel(); return; }
+        if (this._state === S.PAUSED)  { this._setState(S.IN_GAME); return; }
+        if (this._state === S.IN_GAME) { this._setState(S.PAUSED);  return; }
+    }
 
-    /** Deshabilita todos los botones del menú principal durante acciones async */
-    _disableMenuButtons() {
-        [this._els.btnNew, this._els.btnContinue,
-         this._els.btnLoad].forEach(b => {
-            if (b) b.disabled = true;
+    // ─────────────────────────────────────────────────────────────────────────
+    // MODAL
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _showModal({ message, confirmLabel, cancelLabel, onConfirm, onCancel }) {
+        this._els.modalMsg.textContent     = message;
+        this._els.modalConfirm.textContent = confirmLabel;
+        this._els.modalCancel.textContent  = cancelLabel;
+
+        const nc = this._els.modalConfirm.cloneNode(true);
+        const nx = this._els.modalCancel.cloneNode(true);
+        this._els.modalConfirm.replaceWith(nc);
+        this._els.modalCancel.replaceWith(nx);
+        this._els.modalConfirm = nc;
+        this._els.modalCancel  = nx;
+
+        nc.addEventListener('click', () => { this._closeModal(); onConfirm(); });
+        nx.addEventListener('click', () => { this._closeModal(); onCancel?.(); });
+        this._els.modal?.classList.remove('dm-hidden');
+    }
+
+    _confirmModal(message, confirmLabel = 'Confirmar', cancelLabel = 'Cancelar') {
+        return new Promise((resolve) => {
+            this._showModal({
+                message, confirmLabel, cancelLabel,
+                onConfirm: () => resolve(true),
+                onCancel:  () => resolve(false),
+            });
         });
     }
 
-    /** Rehabilita los botones (salvo "Continuar" si no hay autosave) */
-    _enableMenuButtons() {
-        [this._els.btnNew, this._els.btnLoad].forEach(b => {
-            if (b) b.disabled = false;
-        });
-        this._checkContinue(); // revalida el estado real de "Continuar"
+    _closeModal() { this._els.modal?.classList.add('dm-hidden'); }
+    _isModalOpen() { return !this._els.modal?.classList.contains('dm-hidden'); }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LOADING
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _showLoading(msg = 'Cargando...') {
+        if (this._els.loadingMsg) this._els.loadingMsg.textContent = msg;
+        this._els.loadingOverlay?.classList.remove('dm-hidden');
+    }
+    _hideLoading() {
+        this._els.loadingOverlay?.classList.add('dm-hidden');
     }
 
-    /** Feedback visual rápido en el botón de guardado */
-    _flashHUDSave() {
-        const btn = this._els.btnSave;
-        if (!btn) return;
-        btn.textContent = '✓ Guardado';
-        setTimeout(() => { btn.textContent = 'Guardar'; }, 1500);
+    // ─────────────────────────────────────────────────────────────────────────
+    // TOAST — notificación flotante en esquina, desaparece sola
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _toast(msg) {
+        if (!this._els.toast) return;
+        this._els.toast.textContent = msg;
+        this._els.toast.classList.remove('dm-hidden');
+        this._els.toast.classList.add('dm-toast--visible');
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => {
+            this._els.toast.classList.remove('dm-toast--visible');
+            // Esperar la transición CSS antes de ocultar del todo
+            setTimeout(() => this._els.toast.classList.add('dm-hidden'), 300);
+        }, 2500);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SAVES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async _loadSaves() {
+        const SLOTS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
+        await Promise.all(SLOTS.map(async (id) => {
+            this._saves[id] = await this.saveManager.load(id);
+        }));
+        this._autosave = this._saves['autosave'];
+        this._updateMainMenuButtons();
+    }
+
+    _updateMainMenuButtons() {
+        const hasSaves = Object.values(this._saves).some(Boolean);
+        // "Cargar Partida" — activo si hay cualquier save
+        if (this._els.btnLoad)
+            this._els.btnLoad.disabled = !hasSaves;
     }
 }

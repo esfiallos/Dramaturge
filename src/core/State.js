@@ -34,7 +34,16 @@ export class GameState {
             voiceVolume: data.audioSettings?.voiceVolume ?? 1.0,
         };
 
-        // ── Metadata del save ─────────────────────────────────────────────
+        // ── Estado visual activo ─────────────────────────────────────────────
+        // Guardado automáticamente por el Engine en cada BG_CHANGE / SPRITE_SHOW/HIDE.
+        // Permite restaurar la pantalla al cargar sin tener que re-ejecutar el script.
+        //
+        //   bg:      ruta del fondo activo  (string | null)
+        //   sprites: { slot → { actorId, path } }  — slots 'left','center','right'
+        //   mode:    'dialogue' | 'narrate' | null  — modo de textbox activo
+        this.visualState = data.visualState ?? { bg: null, sprites: {}, mode: null };
+
+        // ── Metadata del save ─────────────────────────────────────────────────
         this.savedAt  = data.savedAt  ?? null; // timestamp del último guardado
         this.playTime = data.playTime ?? 0;    // segundos acumulados de juego
     }
@@ -79,8 +88,13 @@ export class GameState {
             flags:         { ...this.flags },
             inventory:     [...this.inventory],
             audioSettings: { ...this.audioSettings },
-            savedAt:       this.savedAt,
-            playTime:      this.playTime,
+            visualState:   {
+                bg:      this.visualState.bg,
+                sprites: { ...this.visualState.sprites },
+                mode:    this.visualState.mode,
+            },
+            savedAt:  this.savedAt,
+            playTime: this.playTime,
         };
     }
 

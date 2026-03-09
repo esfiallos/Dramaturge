@@ -5,7 +5,7 @@
 //   [DOM Overlay]  → textbox, nombre, UI (z-index: 30+)
 //
 // CICLO DE VIDA OBLIGATORIO (PixiJS v8):
-//   const renderer = new Renderer();
+//   const renderer = new MERenderer();
 //   await renderer.init();            ← debe llamarse antes de cualquier otro método
 
 import { Application, Assets, Sprite, Container } from 'pixi.js';
@@ -356,24 +356,16 @@ export class Renderer {
      * @param {boolean} active   - true = narración, false = diálogo
      * @param {number}  [ms=220] - duración del crossfade en ms
      */
-    async _setNarrationMode(active, ms = 220) {
-        const box = this.textBox;
-
-        const already = box.classList.contains('narration-mode');
-        if (already === active) return;
-
-        // Fade out → swap clase → fade in
-        box.style.transition = `opacity ${ms}ms ease`;
-        box.style.opacity    = '0';
-
-        const targetAlpha = active ? 0.15 : 1;
-        this._tweenSpriteAlpha(targetAlpha, ms);
-
-        await new Promise(r => setTimeout(r, ms));
-        box.classList.toggle('narration-mode', active);
-        box.style.opacity = '1';
-        await new Promise(r => setTimeout(r, ms + 10));
-        box.style.transition = '';
+    async _setNarrationMode(active) {
+        // modeTransition ya aplicó la clase y el fade negro antes de llamar
+        // al typewriter — aquí solo corregimos si por algún motivo difieren
+        // (ej: primera línea del script sin transición previa).
+        this.textBox.classList.toggle('narration-mode', active);
+        if (active) {
+            this._tweenSpriteAlpha(0.15, 200);
+        } else {
+            this._tweenSpriteAlpha(1, 200);
+        }
     }
 
     /**
@@ -393,7 +385,7 @@ export class Renderer {
      * @param {number}  holdMs      - tiempo en blanco antes del fade out (ms)
      * @returns {Promise<void>}
      */
-    async modeTransition(toNarration, fadeMs = 180, holdMs = 60) {
+    async modeTransition(toNarration, fadeMs = 140) {
         const alreadyNarration = this.textBox.classList.contains('narration-mode');
 
         // Sin cambio de modo — nada que hacer
@@ -404,12 +396,11 @@ export class Renderer {
 
         this.isTransitioning = true;
 
-        // Preparar overlay blanco
-        overlay.style.background = '#ffffff';
-        overlay.style.transition  = `opacity ${fadeMs}ms ease`;
+        // ── Fase 1: Fade a negro (rápido) ────────────────────────────────
+        overlay.style.background = '#000000';
+        overlay.style.transition = `opacity ${fadeMs}ms ease-in`;
         overlay.classList.add('active');
 
-        // Fade IN a blanco
         await new Promise(resolve => {
             requestAnimationFrame(() => {
                 overlay.style.opacity = '1';
@@ -417,26 +408,32 @@ export class Renderer {
             });
         });
 
-        // Pantalla completamente blanca — limpiar texto anterior AHORA
-        // El usuario no puede ver el swap porque el overlay lo cubre
-        if (this.textEl)  this.textEl.innerText  = '';
-        if (this.nameEl)  this.nameEl.innerText  = '';
+        // ── Pantalla en negro: preparar todo de golpe ─────────────────────
+        if (this.textEl)  this.textEl.innerText = '';
+        if (this.nameEl)  this.nameEl.innerText = '';
         this._setAdvance(false);
 
-        // Pausa mínima en blanco antes de revelar
-        await new Promise(r => setTimeout(r, holdMs));
+        // Cambiar modo de textbox mientras nadie puede verlo
+        this.textBox.classList.toggle('narration-mode', toNarration);
 
-        // El typewriter y el modo ya fueron actualizados por el Engine
-        // mientras estábamos en blanco — ahora revelamos
+        // Ajustar alpha de sprites para el modo destino
+        const targetAlpha = toNarration ? 0.15 : 1;
+        this._tweenSpriteAlpha(targetAlpha, fadeMs * 2);
 
-        // Fade OUT del blanco
-        overlay.style.opacity = '0';
-        await new Promise(r => setTimeout(r, fadeMs));
+        // ── Fase 2: Fade-out del negro EN BACKGROUND ──────────────────────
+        // Arrancamos el reveal pero NO esperamos — el typewriter empieza
+        // mientras el negro se levanta, dando la sensación de una sola acción.
+        overlay.style.transition = `opacity ${fadeMs * 1.8}ms ease-out`;
+        requestAnimationFrame(() => { overlay.style.opacity = '0'; });
 
-        overlay.classList.remove('active');
-        overlay.style.transition = '';
-        overlay.style.background = '';
+        // Limpiar el overlay cuando termine (sin bloquear)
+        setTimeout(() => {
+            overlay.classList.remove('active');
+            overlay.style.transition = '';
+            overlay.style.background = '';
+        }, fadeMs * 1.8 + 20);
 
+        // Desbloquear el engine: el typewriter arranca solapado con el fade-out
         this.isTransitioning = false;
     }
 

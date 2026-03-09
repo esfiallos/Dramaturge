@@ -31,8 +31,8 @@ export class SaveManager {
     async save(state, slotId = 'autosave') {
         const snapshot = {
             slotId,
-            savedAt: Date.now(),
             ...state.toJSON(),
+            savedAt: Date.now(), // DESPUÉS del spread — gana sobre state.savedAt
         };
 
         await this.db.saves.put(snapshot);
@@ -92,7 +92,7 @@ export class SaveManager {
         const url      = URL.createObjectURL(blob);
 
         const date     = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-        const filename = `emers_save_${date}.json`;
+        const filename = `dramaturge_save_${date}.json`;
 
         const a   = document.createElement('a');
         a.href    = url;

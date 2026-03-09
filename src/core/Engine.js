@@ -6,8 +6,8 @@ import { GameState } from './State.js';
 export class Dramaturge {
     /**
      * @param {object}      db           - Instancia de Dexie
-     * @param {MERenderer}  renderer     - Módulo de render
-     * @param {MEAudio}     audioManager - Módulo de audio
+     * @param {Renderer}  renderer     - Módulo de render
+     * @param {AudioManager}     audioManager - Módulo de audio
      * @param {GameState}   state        - Estado del juego (crea uno nuevo si no se pasa)
      * @param {SaveManager} saveManager  - Gestor de guardado (autosave desactivado si null)
      */
@@ -52,11 +52,47 @@ export class Dramaturge {
     async resumeFromState(loadedState) {
         this.state        = loadedState;
         this.currentIndex = loadedState.currentIndex;
+
+        // ── Restaurar audio ───────────────────────────────────────────────
         const { bgmVolume, sfxVolume, voiceVolume } = loadedState.audioSettings;
         this.audio.setVolume('bgm',   bgmVolume);
         this.audio.setVolume('se',    sfxVolume);
         this.audio.setVolume('voice', voiceVolume);
-        console.log(`[Engine] Reanudando desde índice ${this.currentIndex}.`);
+
+        // ── Restaurar estado visual (fondo + sprites) ─────────────────────
+        // Orden garantizado: fondo → sprites → modo de textbox
+        const vs = loadedState.visualState ?? {};
+
+        // 1. Fondo
+        if (vs.bg) {
+            await this.renderer.changeBackground(vs.bg, 'none');
+        }
+
+        // 2. Sprites (cargar pawn si no está activo y renderizar en su slot)
+        if (vs.sprites) {
+            for (const [slot, { actorId, path }] of Object.entries(vs.sprites)) {
+                if (!this.activePawns.has(actorId)) {
+                    const data = await this.db.characters.get(actorId);
+                    if (data) {
+                        const { Character } = await import('./models/Character.js');
+                        this.activePawns.set(actorId, new Character(data));
+                    }
+                }
+                this.slots[slot] = actorId;
+                await this.renderer.renderSprite(actorId, path, slot, 'none');
+            }
+        }
+
+        // 3. Modo de textbox
+        if (vs.mode === 'narrate') {
+            this.renderer._setNarrationMode?.(true);
+            this._lastTextMode = 'narrate';
+        } else if (vs.mode === 'dialogue') {
+            this.renderer._setNarrationMode?.(false);
+            this._lastTextMode = 'dialogue';
+        }
+
+        console.log(`[Engine] Reanudando desde índice ${this.currentIndex}. Visual restaurado.`);
     }
 
     async next() {
@@ -119,6 +155,8 @@ export class Dramaturge {
                 this._clearActorFromSlots(inst.actor);
                 this.slots[inst.slot] = inst.actor;
                 await this.renderer.renderSprite(inst.actor, path, inst.slot, inst.effect);
+                // Persistir sprite activo para restaurar al cargar
+                this.state.visualState.sprites[inst.slot] = { actorId: inst.actor, path };
                 await this.next();
                 break;
             }
@@ -128,6 +166,7 @@ export class Dramaturge {
                 if (slot) {
                     await this.renderer.hideSprite(inst.actor, slot, inst.effect);
                     this.slots[slot] = null;
+                    delete this.state.visualState.sprites[slot]; // ← limpiar del state
                 }
                 await this.next();
                 break;
@@ -137,6 +176,7 @@ export class Dramaturge {
 
             case 'BG_CHANGE': {
                 await this.renderer.changeBackground(inst.target, inst.effect, inst.time);
+                this.state.visualState.bg = inst.target; // ← persistir fondo activo
                 await this.next();
                 break;
             }
@@ -162,6 +202,7 @@ export class Dramaturge {
                     await this.renderer.modeTransition(false);
                 }
                 this._lastTextMode = 'dialogue';
+                this.state.visualState.mode = 'dialogue';
 
                 if (inst.pose && pawn) {
                     const posePath  = pawn.getSprite(inst.pose);
@@ -188,7 +229,7 @@ export class Dramaturge {
                 if (this._lastTextMode === 'dialogue') {
                     await this.renderer.modeTransition(true);
                 }
-                this._lastTextMode = 'narrate';
+                this.state.visualState.mode = 'narrate';
 
                 this.isBlocked = true;
 
@@ -235,7 +276,7 @@ export class Dramaturge {
                 // Mostrar resultado como narración — desbloquea al hacer clic
                 const resultText = passed ? inst.passText : inst.failText;
                 // El resultado del puzzle usa modo narrador
-                this._lastTextMode = 'narrate';
+                this.state.visualState.mode = 'narrate';
 
                 await this.renderer.typewriter(null, resultText, () => {
                     this.isBlocked = false;
@@ -248,7 +289,7 @@ export class Dramaturge {
                 this._syncState();
 
                 if (!this.sceneLoader) {
-                    this.state.currentFile = `${inst.target}.ems`;
+                    this.state.currentFile = `${inst.target}.dan`;
                     console.log(`[Engine] GOTO → "${inst.target}.dan". Sin SceneManager: detenido.`);
                     break;
                 }

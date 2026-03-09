@@ -1,0 +1,325 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   menu-additions.css
+   Estilos para los componentes dinámicos del MenuSystem.
+   Todos los selectores usan el prefijo dm- para evitar colisiones.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Base: clase compartida por todos los overlays ─────────────────────── */
+.dm-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.dm-hidden {
+    display: none !important;
+}
+
+/* ── Panel flotante (slots, ajustes, audio) ─────────────────────────────── */
+.dm-panel {
+    z-index: 850;
+    background: rgba(5, 5, 5, 0.96);
+    backdrop-filter: blur(6px);
+}
+
+.dm-panel__inner {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 340px;
+    max-width: 480px;
+    width: 100%;
+    padding: 2.4rem 2rem;
+    border: 1px solid rgba(212, 175, 55, 0.25);
+}
+
+.dm-panel__title {
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.85rem;
+    font-weight: 400;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    text-align: center;
+    margin: 0 0 0.5rem;
+}
+
+.dm-panel__group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.dm-panel__back {
+    margin-top: 0.8rem;
+    opacity: 0.7;
+    font-size: 0.8rem;
+}
+.dm-panel__back:hover { opacity: 1; }
+
+/* ── Slots ──────────────────────────────────────────────────────────────── */
+.dm-slot-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.dm-slot-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border: 1px solid rgba(212, 175, 55, 0.2);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.dm-slot-item:hover {
+    background: rgba(212, 175, 55, 0.08);
+    border-color: rgba(212, 175, 55, 0.5);
+}
+.dm-slot-item--empty {
+    opacity: 0.4;
+    cursor: default;
+}
+.dm-slot-item--empty:hover {
+    background: transparent;
+    border-color: rgba(212, 175, 55, 0.2);
+}
+
+.dm-slot-name {
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.9rem;
+    letter-spacing: 0.1em;
+}
+.dm-slot-meta {
+    color: rgba(201, 184, 130, 0.55);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+}
+
+/* ── Audio ──────────────────────────────────────────────────────────────── */
+.dm-audio-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+.dm-audio-row label {
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.85rem;
+    letter-spacing: 0.1em;
+    min-width: 64px;
+}
+.dm-audio-row input[type="range"] {
+    flex: 1;
+    accent-color: #c9b882;
+}
+
+/* ── Modal de confirmación ──────────────────────────────────────────────── */
+.dm-modal {
+    z-index: 900;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(4px);
+}
+
+.dm-modal__box {
+    background: #0a0a0a;
+    border: 1px solid rgba(212, 175, 55, 0.3);
+    padding: 2.2rem 2.4rem;
+    min-width: 300px;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 1.6rem;
+    text-align: center;
+}
+
+.dm-modal__msg {
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 1rem;
+    line-height: 1.55;
+    margin: 0;
+    white-space: pre-line;
+}
+
+.dm-modal__actions {
+    display: flex;
+    gap: 0.8rem;
+    justify-content: center;
+}
+
+/* ── Loading overlay ────────────────────────────────────────────────────── */
+.dm-loading {
+    z-index: 950;
+    background: rgba(0, 0, 0, 0.9);
+}
+
+#dm-loading-msg {
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 1rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    opacity: 0.75;
+}
+
+/* ── Toast — notificación flotante esquina inferior derecha ─────────────── */
+.dm-toast {
+    position: fixed;
+    bottom: 2rem;
+    right: 2rem;
+    z-index: 1000;
+    background: rgba(10, 10, 10, 0.92);
+    border: 1px solid rgba(212, 175, 55, 0.4);
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.85rem;
+    letter-spacing: 0.12em;
+    padding: 0.65rem 1.2rem;
+    pointer-events: none;
+
+    /* Animación de entrada/salida */
+    opacity: 0;
+    transform: translateY(0.5rem);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.dm-toast--visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* ── HUD — barra superior ───────────────────────────────────────────────── */
+#hud {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: 44px;
+    z-index: 50;
+
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0;
+    padding: 0 1.25rem;
+
+    background: rgba(3, 3, 5, 0.96);
+    border-bottom: 1px solid rgba(201, 168, 76, 0.15);
+    backdrop-filter: blur(4px);
+    box-sizing: border-box;
+}
+
+/* Botones del HUD */
+.hud-btn {
+    height: 100%;
+    padding: 0 1.1rem;
+    background: transparent;
+    border: none;
+    border-left: 1px solid rgba(212, 175, 55, 0.15);
+    border-radius: 0;
+    color: #c9b882;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.hud-btn:hover {
+    background: rgba(212, 175, 55, 0.1);
+}
+
+/* Salir — diferenciado en color */
+.hud-btn--exit {
+    color: rgba(210, 90, 90, 0.85);
+}
+.hud-btn--exit:hover {
+    background: rgba(180, 40, 40, 0.15);
+    color: rgba(230, 100, 100, 1);
+}
+
+/* ── HUD info — lado izquierdo ──────────────────────────────────────────── */
+#hud-info {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    padding-left: 0.25rem;
+    overflow: hidden;
+}
+
+#hud-title {
+    color: #c9a84c;
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+#hud-scene {
+    color: rgba(237, 232, 218, 0.45);
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#hud-playtime {
+    color: rgba(237, 232, 218, 0.25);
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    margin-left: auto;
+    margin-right: 0.5rem;
+}
+
+/* ── Slot — botón eliminar ──────────────────────────────────────────────── */
+.dm-slot-delete {
+    margin-left: auto;
+    padding: 0.2rem 0.55rem;
+    background: transparent;
+    border: 1px solid rgba(212, 175, 55, 0.25);
+    color: rgba(212, 175, 55, 0.5);
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    flex-shrink: 0;
+}
+.dm-slot-delete:hover {
+    border-color: rgba(220, 80, 80, 0.7);
+    color: rgba(220, 80, 80, 0.9);
+    background: rgba(220, 80, 80, 0.08);
+}
+
+/* Ajustar flex del slot-item para que el botón quede al extremo derecho */
+.dm-slot-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+.dm-slot-item .dm-slot-meta {
+    margin-left: auto; /* empuja al final, pero el botón lo sobreescribirá */
+}
+.dm-slot-item:has(.dm-slot-delete) .dm-slot-meta {
+    margin-left: 0; /* cuando hay botón, meta queda entre name y delete */
+}
+
+/* ── Text-box: sin transición de resize ────────────────────────────────────
+   El swap diálogo ↔ narración ocurre mientras la pantalla está en negro.
+   La transición CSS no debe animar el cambio de tamaño — ya está cubierto. */
+#text-box {
+    transition: none !important;
+}
