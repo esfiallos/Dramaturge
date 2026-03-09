@@ -257,6 +257,25 @@ export class EmersEngine {
                 break;
             }
 
+            // ── Condicionales ──────────────────────────────────────────────────────
+
+            case 'COND_JUMP': {
+                // Evaluar la condición — si es FALSA, saltar a targetIndex
+                const passes = this._evalCondition(inst.condition);
+                if (!passes) {
+                    this.currentIndex = inst.targetIndex;
+                }
+                await this.next();
+                break;
+            }
+
+            case 'JUMP': {
+                // Salto incondicional (generado por el bloque else)
+                this.currentIndex = inst.targetIndex;
+                await this.next();
+                break;
+            }
+
             default: {
                 console.warn(`[Engine] Instrucción no reconocida: "${inst.type}". Saltando.`);
                 await this.next();
@@ -295,6 +314,54 @@ export class EmersEngine {
     // ─────────────────────────────────────────────────────────────────────────
     // HELPERS PRIVADOS
     // ─────────────────────────────────────────────────────────────────────────
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EVALUADOR DE CONDICIONES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Evalúa una condición compilada por el Parser.
+     * @param   {object} cond - instrucción IF_FLAG o IF_INVENTORY original
+     * @returns {boolean}
+     */
+    _evalCondition(cond) {
+        if (cond.type === 'IF_INVENTORY') {
+            return this.state.hasItem(cond.item);
+        }
+
+        if (cond.type === 'IF_FLAG') {
+            const raw     = this.state.getFlag(cond.key, null);
+            const current = this._coerce(raw);
+            const target  = this._coerce(cond.value);
+            const op      = cond.op;
+
+            switch (op) {
+                case '==': return current == target;
+                case '!=': return current != target;
+                case '>':  return Number(current) >  Number(target);
+                case '<':  return Number(current) <  Number(target);
+                case '>=': return Number(current) >= Number(target);
+                case '<=': return Number(current) <= Number(target);
+                default:
+                    console.warn(`[Engine] Operador desconocido: "${op}"`);
+                    return false;
+            }
+        }
+
+        console.warn(`[Engine] Tipo de condición desconocido: "${cond.type}"`);
+        return false;
+    }
+
+    /**
+     * Convierte strings a sus tipos nativos para comparación.
+     * 'true'/'false' → boolean, números → number, resto → string.
+     */
+    _coerce(val) {
+        if (val === 'true')  return true;
+        if (val === 'false') return false;
+        const n = Number(val);
+        return isNaN(n) ? val : n;
+    }
 
     _syncState() {
         this.state.currentIndex = this.currentIndex;

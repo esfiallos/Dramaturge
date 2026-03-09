@@ -10,7 +10,8 @@ import { MEAudio }      from '../src/modules/Audio.js';
 import { GameState }    from '../src/core/State.js';
 import { SaveManager }  from '../src/core/SaveManager.js';
 import { PuzzleSystem } from '../src/modules/PuzzleSystem.js';
-import { SceneManager } from '../src/core/SceneManager.js';
+import { SceneManager }      from '../src/core/SceneManager.js';
+import { CharacterManager }  from './CharacterManager.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SYNTAX HIGHLIGHTER
@@ -328,6 +329,48 @@ goto capitulo_02
 // ─────────────────────────────────────────────────────────────────────────────
 // ARRANQUE
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHARACTER MANAGER
+// ─────────────────────────────────────────────────────────────────────────────
+
+let charManager;
+
+function initCharManager() {
+    const panel = document.getElementById('char-panel');
+    if (!panel) return;
+    charManager = new CharacterManager(db);
+    charManager.mount(panel);
+}
+
+// Exponer logAll() en consola para consulta rápida en cualquier momento:
+//   charManager.logAll()   ← desde la consola del navegador
+window.addEventListener('load', () => {
+    window.__vemn = window.__vemn ?? {};
+    window.__vemn.logChars = () => charManager?.logAll();
+    console.log('[Lab] Tip: usa __vemn.logChars() para ver todos los personajes en consola.');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TAB NAVIGATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+function initTabs() {
+    document.querySelectorAll('.lab-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const target = tab.dataset.tab;
+
+            document.querySelectorAll('.lab-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.lab-tab-pane').forEach(p => p.classList.remove('active'));
+
+            tab.classList.add('active');
+            document.getElementById(`lab-tab-${target}`)?.classList.add('active');
+
+            // Refrescar la lista de personajes cada vez que se abre el tab
+            if (target === 'chars') charManager?.mount(document.getElementById('char-panel'));
+        });
+    });
+}
 
 async function boot() {
     await renderer.init();

@@ -81,4 +81,21 @@ export const EMS_GRAMMAR = {
 
     // set inventory.remove item_key
     INVENTORY_REMOVE: /^set\s+inventory\.remove\s+(?<item>\w+)/,
+
+    // ── Condicionales ─────────────────────────────────────────────────────────
+    //
+    // Comparadores soportados: == != > < >= <=
+    //
+    // if flag.key == value
+    // if flag.key > 3
+    IF_FLAG: /^if\s+flag\.(?<key>\w+)\s*(?<op>==|!=|>=|<=|>|<)\s*(?<value>true|false|\d+(?:\.\d+)?|\w+)/,
+
+    // if inventory.has item_key
+    IF_INVENTORY: /^if\s+inventory\.has\s+(?<item>\w+)/,
+
+    // else
+    ELSE: /^else$/,
+
+    // endif
+    ENDIF: /^endif$/,
 };

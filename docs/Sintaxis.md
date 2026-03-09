@@ -136,6 +136,43 @@ set inventory.remove llave_maestra
 
 ---
 
+### Condicionales
+
+```ems
+# Comparar un flag
+if flag.puzzle_solved == true
+    goto cap01/scene_02_pass
+else
+    goto cap01/scene_02_fail
+endif
+
+# Comparaciones numéricas
+if flag.intentos > 3
+    narrate "Demasiados intentos. El tiempo se acaba."
+endif
+
+if flag.puntuacion >= 10
+    set flag.rango = experto
+endif
+
+# Verificar inventario
+if inventory.has llave_maestra
+    goto sala_secreta
+else
+    narrate "La puerta no cede. Te falta algo."
+endif
+```
+
+**Operadores soportados:** `==` `!=` `>` `<` `>=` `<=`
+
+**Reglas:**
+- Los bloques pueden anidarse
+- El `else` es opcional
+- Siempre cerrar con `endif`
+- El motor evalúa `true`/`false` como booleanos, números como números, y el resto como strings
+
+---
+
 ## Ejemplo de escena completa
 
 ```ems

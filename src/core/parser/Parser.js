@@ -54,31 +54,117 @@ const PARSE_RULES = [
     { regex: EMS_GRAMMAR.INVENTORY_ADD,    type: 'INVENTORY_ADD'    },
     { regex: EMS_GRAMMAR.INVENTORY_REMOVE, type: 'INVENTORY_REMOVE' },
     { regex: EMS_GRAMMAR.SET_FLAG,         type: 'SET_FLAG'         },
+
+    // ── Condicionales (marcadores de bloque — el segundo pase los compila a saltos) ──
+    { regex: EMS_GRAMMAR.IF_FLAG,      type: 'IF_FLAG'      },
+    { regex: EMS_GRAMMAR.IF_INVENTORY, type: 'IF_INVENTORY' },
+    { regex: EMS_GRAMMAR.ELSE,         type: 'ELSE'         },
+    { regex: EMS_GRAMMAR.ENDIF,        type: 'ENDIF'        },
 ];
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
 export class EParser {
-    parse(rawScript) {
-        const lines        = rawScript.trim().split('\n');
-        const instructions = [];
 
+    parse(rawScript) {
+        const lines = rawScript.trim().split('\n');
         console.log(`[Parser] Procesando ${lines.length} líneas...`);
 
+        // ── Pase 1: matchear cada línea contra las reglas ─────────────────────
+        const raw = [];
         lines.forEach((line, index) => {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith('#')) return;
 
             const instruction = this._matchLine(trimmed, index);
-            instructions.push(instruction);
+            raw.push(instruction);
 
             if (instruction.type === 'UNKNOWN') {
                 console.warn(`[Parser] Línea ${index + 1} no reconocida: "${trimmed}"`);
             }
         });
 
+        // ── Pase 2: resolver bloques if/else/endif en saltos con índices ──────
+        const instructions = this._resolveBlocks(raw);
+
         console.log('[Parser] Árbol generado:', instructions);
         return instructions;
+    }
+
+    /**
+     * Convierte los marcadores IF/ELSE/ENDIF en instrucciones de salto con
+     * índices precalculados. El engine no necesita saber nada de bloques.
+     *
+     * IF_FLAG   { condition } → COND_JUMP { condition, targetIndex }
+     *   ... cuerpo del if ...
+     * ELSE                    → JUMP      { targetIndex }
+     *   ... cuerpo del else ...
+     * ENDIF                   → (eliminado)
+     *
+     * Si no hay ELSE:
+     * IF_FLAG   { condition } → COND_JUMP { condition, targetIndex: índice tras ENDIF }
+     *   ... cuerpo ...
+     * ENDIF                   → (eliminado)
+     *
+     * Los bloques pueden anidarse.
+     */
+    _resolveBlocks(raw) {
+        const out   = [];
+        const stack = []; // stack de { jumpIndex, hasElse }
+
+        for (let i = 0; i < raw.length; i++) {
+            const inst = raw[i];
+
+            if (inst.type === 'IF_FLAG' || inst.type === 'IF_INVENTORY') {
+                // Emitir COND_JUMP con targetIndex pendiente (se rellena al encontrar ELSE/ENDIF)
+                const jumpInst = {
+                    type:        'COND_JUMP',
+                    condition:   inst,     // instrucción original con key/op/value
+                    targetIndex: -1,       // pendiente
+                    line:        inst.line,
+                };
+                stack.push({ jumpIdx: out.length, hasElse: false });
+                out.push(jumpInst);
+
+            } else if (inst.type === 'ELSE') {
+                const frame = stack[stack.length - 1];
+                if (!frame) {
+                    console.error(`[Parser] ELSE sin IF en línea ${inst.line + 1}`);
+                    continue;
+                }
+                // El COND_JUMP del IF ahora apunta al índice siguiente (tras este JUMP)
+                // Emitir un JUMP incondicional para saltar el cuerpo del else
+                const jumpInst = {
+                    type:        'JUMP',
+                    targetIndex: -1,   // pendiente — se rellena al encontrar ENDIF
+                    line:        inst.line,
+                };
+                // Fijar target del COND_JUMP al índice que tendrá el JUMP + 1
+                out[frame.jumpIdx].targetIndex = out.length + 1;
+                frame.jumpIdx  = out.length; // ahora rastreamos el JUMP del else
+                frame.hasElse  = true;
+                out.push(jumpInst);
+
+            } else if (inst.type === 'ENDIF') {
+                const frame = stack.pop();
+                if (!frame) {
+                    console.error(`[Parser] ENDIF sin IF en línea ${inst.line + 1}`);
+                    continue;
+                }
+                // Fijar el target del último jump pendiente al índice actual (tras endif)
+                out[frame.jumpIdx].targetIndex = out.length;
+                // ENDIF no emite instrucción — se elimina
+
+            } else {
+                out.push(inst);
+            }
+        }
+
+        if (stack.length > 0) {
+            console.error(`[Parser] ${stack.length} bloque(s) if sin cerrar con endif.`);
+        }
+
+        return out;
     }
 
     /**
