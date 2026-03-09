@@ -1,7 +1,7 @@
-# Sintaxis del lenguaje `.ems`
+# Sintaxis del lenguaje **Koedan** (`.dan`)
 
-Referencia completa del lenguaje de scripting de VEMN.  
-Los archivos `.ems` viven en `public/scripts/` y se cargan por fetch en tiempo de ejecución.
+Referencia completa del lenguaje de scripting de Dramaturge.  
+Los archivos `.dan` de Koedan viven en `public/scripts/` y se cargan por fetch en tiempo de ejecución.
 
 ---
 
@@ -106,7 +106,7 @@ puzzle P01 pass:"¡Lo lograste!" fail:"Casi. Sigamos."
 ```
 
 ```ems
-# Salto de escena — carga otro archivo .ems
+# Salto de escena — carga otro archivo .dan
 # La ruta es relativa a /public/scripts/
 goto cap01/scene_02
 goto intro

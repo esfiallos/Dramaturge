@@ -1,4 +1,4 @@
-# VEMN — Visual Emer Novel
+# Dramaturge
 
 > Motor de novelas visuales con sistema de puzzles, scripting propio y estética de misterio/realeza.  
 > Construido con JavaScript vanilla + Vite + PixiJS v8.
@@ -14,7 +14,7 @@
 | UI / Texto | DOM puro |
 | Persistencia | Dexie v2 (IndexedDB) |
 | Estilos | CSS puro + Cinzel / Crimson Pro |
-| Scripting | Lenguaje `.ems` propio (Table-Driven Parser) |
+| Scripting | Lenguaje `.dan` propio (Table-Driven Parser) |
 
 ---
 
@@ -26,9 +26,9 @@
 ├── vite.config.js
 ├── package.json
 ├── public/
-│   ├── scripts/                ← Archivos .ems del juego
+│   ├── scripts/                ← Archivos .dan del juego
 │   │   └── cap01/
-│   │       └── scene_01.ems
+│   │       └── scene_01.dan
 │   └── assets/
 │       ├── bg/                 ← Fondos (jpg, png, webp)
 │       ├── sprites/
@@ -45,7 +45,7 @@
 │   │   ├── Engine.js           ← Despachador central
 │   │   ├── State.js            ← GameState
 │   │   ├── SaveManager.js      ← Dexie + export/import JSON
-│   │   ├── SceneManager.js     ← Carga de archivos .ems
+│   │   ├── SceneManager.js     ← Carga de archivos .dan
 │   │   ├── models/
 │   │   │   └── Character.js
 │   │   ├── parser/
@@ -126,7 +126,7 @@ El engine prueba los formatos automáticamente si el archivo no tiene extensión
 
 ---
 
-## Convenciones de rutas en `.ems`
+## Convenciones de rutas en `.dan`
 
 ```
 # Fondos       → busca en /assets/bg/
@@ -151,7 +151,7 @@ Para más detalle de la sintaxis ver [`docs/SINTAXIS.md`](docs/SINTAXIS.md).
 
 ## Laboratorio de desarrollo
 
-El lab en `/dev/` permite escribir y ejecutar scripts `.ems` en tiempo real sin tocar el juego de producción. Incluye:
+El lab en `/dev/` permite escribir y ejecutar scripts `.dan` en tiempo real sin tocar el juego de producción. Incluye:
 
 - Editor con syntax highlighting
 - Consola de instrucciones parseadas
@@ -163,6 +163,3 @@ El lab en `/dev/` permite escribir y ejecutar scripts `.ems` en tiempo real sin 
 
 ---
 
-## Licencia
-
-Privado — uso personal del autor.

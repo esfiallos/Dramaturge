@@ -1,10 +1,10 @@
 // dev/editor.js
-// Lógica del editor de scripts .ems
-// Comunicación con canvas: localStorage['vemn_script'] + localStorage['vemn_filename']
+// Lógica del editor de scripts .dan
+// Comunicación con canvas: localStorage['dan_script'] + localStorage['dan_filename']
 
-import { EParser } from '../src/core/parser/Parser.js';
+import { KParser } from '../src/core/parser/Parser.js';
 
-const parser   = new EParser();
+const parser   = new KParser();
 
 const editorEl   = document.getElementById('ems-editor');
 const highlightEl= document.getElementById('ems-highlight');
@@ -126,8 +126,8 @@ function render() {
     }, 400);
 
     // Persist to localStorage for canvas
-    localStorage.setItem('vemn_script', text);
-    localStorage.setItem('vemn_filename', filenameEl.value || 'script');
+    localStorage.setItem('dan_script', text);
+    localStorage.setItem('dan_filename', filenameEl.value || 'script');
 }
 
 // ─── Cursor position ──────────────────────────────────────────────────────
@@ -166,12 +166,12 @@ editorEl.addEventListener('click',   updateCursor);
 // ─── Save to file ─────────────────────────────────────────────────────────
 
 document.getElementById('btn-save').addEventListener('click', () => {
-    const name    = (filenameEl.value || 'script').replace(/\.ems$/, '');
+    const name    = (filenameEl.value || 'script').replace(/\.dan$/, '');
     const blob    = new Blob([editorEl.value], { type: 'text/plain' });
     const url     = URL.createObjectURL(blob);
     const a       = document.createElement('a');
     a.href        = url;
-    a.download    = `${name}.ems`;
+    a.download    = `${name}.dan`;
     a.click();
     URL.revokeObjectURL(url);
 
@@ -188,7 +188,7 @@ document.getElementById('load-file').addEventListener('change', (e) => {
     reader.onload = (ev) => {
         editorEl.value = ev.target.result;
         // Update filename from loaded file
-        filenameEl.value = file.name.replace(/\.ems$/, '');
+        filenameEl.value = file.name.replace(/\.dan$/, '');
         render();
     };
     reader.readAsText(file);
@@ -200,17 +200,17 @@ document.getElementById('load-file').addEventListener('change', (e) => {
 
 document.getElementById('btn-run').addEventListener('click', () => {
     // Persist latest state before opening
-    localStorage.setItem('vemn_script', editorEl.value);
-    localStorage.setItem('vemn_filename', filenameEl.value || 'script');
-    window.open('/dev/canvas.html', 'vemn-canvas');
+    localStorage.setItem('dan_script', editorEl.value);
+    localStorage.setItem('dan_filename', filenameEl.value || 'script');
+    window.open('/dev/canvas.html', 'dan-canvas');
 });
 
 // ─── Restore from localStorage ────────────────────────────────────────────
 
-const saved = localStorage.getItem('vemn_script');
+const saved = localStorage.getItem('dan_script');
 if (saved) {
     editorEl.value = saved;
-    filenameEl.value = localStorage.getItem('vemn_filename') || 'script';
+    filenameEl.value = localStorage.getItem('dan_filename') || 'script';
 }
 
 render();

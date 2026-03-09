@@ -11,7 +11,7 @@
 //   3. Añadir el case en Engine.js execute()
 //   — parse() no se toca.
 
-import { EMS_GRAMMAR } from './Grammar.js';
+import { KDN_GRAMMAR } from './Grammar.js';
 
 // ─── Tabla de reglas ──────────────────────────────────────────────────────────
 //
@@ -30,41 +30,41 @@ const PARSE_RULES = [
 
     // ── Personajes ────────────────────────────────────────────────────────────
     {
-        regex:     EMS_GRAMMAR.PAWN_INSTANTIATE,
+        regex:     KDN_GRAMMAR.PAWN_INSTANTIATE,
         type:      'PAWN_LOAD',
         transform: (g) => ({ names: g.names.split(',').map(n => n.trim()) }),
     },
-    { regex: EMS_GRAMMAR.SHOW, type: 'SPRITE_SHOW' },
-    { regex: EMS_GRAMMAR.HIDE, type: 'SPRITE_HIDE' },
+    { regex: KDN_GRAMMAR.SHOW, type: 'SPRITE_SHOW' },
+    { regex: KDN_GRAMMAR.HIDE, type: 'SPRITE_HIDE' },
 
     // ── Diálogo y narración ───────────────────────────────────────────────────
-    { regex: EMS_GRAMMAR.DIALOGUE, type: 'DIALOGUE' },
-    { regex: EMS_GRAMMAR.NARRATE,  type: 'NARRATE'  },
+    { regex: KDN_GRAMMAR.DIALOGUE, type: 'DIALOGUE' },
+    { regex: KDN_GRAMMAR.NARRATE,  type: 'NARRATE'  },
 
     // ── Escena y audio ────────────────────────────────────────────────────────
-    { regex: EMS_GRAMMAR.BG_COMMAND,    type: 'BG_CHANGE' },
-    { regex: EMS_GRAMMAR.AUDIO_COMMAND, type: 'AUDIO'     },
+    { regex: KDN_GRAMMAR.BG_COMMAND,    type: 'BG_CHANGE' },
+    { regex: KDN_GRAMMAR.AUDIO_COMMAND, type: 'AUDIO'     },
 
     // ── Control de flujo ──────────────────────────────────────────────────────
-    { regex: EMS_GRAMMAR.WAIT,   type: 'WAIT'   },
-    { regex: EMS_GRAMMAR.PUZZLE, type: 'PUZZLE' },
-    { regex: EMS_GRAMMAR.GOTO,   type: 'GOTO'   },
+    { regex: KDN_GRAMMAR.WAIT,   type: 'WAIT'   },
+    { regex: KDN_GRAMMAR.PUZZLE, type: 'PUZZLE' },
+    { regex: KDN_GRAMMAR.GOTO,   type: 'GOTO'   },
 
     // ── Estado (orden: más específico primero dentro del grupo 'set') ─────────
-    { regex: EMS_GRAMMAR.INVENTORY_ADD,    type: 'INVENTORY_ADD'    },
-    { regex: EMS_GRAMMAR.INVENTORY_REMOVE, type: 'INVENTORY_REMOVE' },
-    { regex: EMS_GRAMMAR.SET_FLAG,         type: 'SET_FLAG'         },
+    { regex: KDN_GRAMMAR.INVENTORY_ADD,    type: 'INVENTORY_ADD'    },
+    { regex: KDN_GRAMMAR.INVENTORY_REMOVE, type: 'INVENTORY_REMOVE' },
+    { regex: KDN_GRAMMAR.SET_FLAG,         type: 'SET_FLAG'         },
 
     // ── Condicionales (marcadores de bloque — el segundo pase los compila a saltos) ──
-    { regex: EMS_GRAMMAR.IF_FLAG,      type: 'IF_FLAG'      },
-    { regex: EMS_GRAMMAR.IF_INVENTORY, type: 'IF_INVENTORY' },
-    { regex: EMS_GRAMMAR.ELSE,         type: 'ELSE'         },
-    { regex: EMS_GRAMMAR.ENDIF,        type: 'ENDIF'        },
+    { regex: KDN_GRAMMAR.IF_FLAG,      type: 'IF_FLAG'      },
+    { regex: KDN_GRAMMAR.IF_INVENTORY, type: 'IF_INVENTORY' },
+    { regex: KDN_GRAMMAR.ELSE,         type: 'ELSE'         },
+    { regex: KDN_GRAMMAR.ENDIF,        type: 'ENDIF'        },
 ];
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
-export class EParser {
+export class KParser {
 
     parse(rawScript) {
         const lines = rawScript.trim().split('\n');

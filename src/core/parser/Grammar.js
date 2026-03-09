@@ -1,6 +1,6 @@
 // src/core/parser/Grammar.js
 //
-// SINTAXIS COMPLETA DEL LENGUAJE .EMS
+// SINTAXIS COMPLETA DEL LENGUAJE KOEDAN (.dan)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // PARA AÑADIR UNA REGLA:
@@ -26,7 +26,7 @@
 //   set inventory.add llave_maestra
 //   set inventory.remove llave_maestra
 
-export const EMS_GRAMMAR = {
+export const KDN_GRAMMAR = {
 
     // ── Personajes ────────────────────────────────────────────────────────────
 

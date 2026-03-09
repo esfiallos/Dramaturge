@@ -6,8 +6,8 @@
 
 ```
 main.js
-├── MERenderer        → PixiJS v8 (canvas) + DOM overlay
-├── MEAudio           → 3 canales HTMLAudioElement
+├── Renderer        → PixiJS v8 (canvas) + DOM overlay
+├── Audio           → 3 canales HTMLAudioElement
 ├── EParser           → Table-Driven, produce AST de instrucciones
 ├── GameState         → flags, inventory, audioSettings, playTime
 ├── SaveManager       → Dexie + JSON export/import
@@ -15,7 +15,7 @@ main.js
 │   ├── engine.puzzleResolver = PuzzleSystem.open()
 │   └── engine.sceneLoader    = SceneManager.goto()
 ├── PuzzleSystem      → 3 tipos, Promise-based, DOM overlay
-├── SceneManager      → fetch .ems + caché + loadOnly
+├── SceneManager      → fetch .dan + caché + loadOnly
 └── MenuSystem        → splash, pausa, slots, audio
     ├── deps: engine, saveManager, sceneManager, audio
     └── preload: _cachedSaves en init()
@@ -32,7 +32,7 @@ MenuSystem.init()
 [Usuario clic "Nueva Partida"]
   └─ MenuSystem._newGame()
        └─ SceneManager.start('cap01/scene_01')
-            └─ _fetch('/scripts/cap01/scene_01.ems')
+            └─ _fetch('/scripts/cap01/scene_01.dan')
             └─ parser.parse(raw) → instrucciones[]
             └─ engine.loadScript(instrucciones)
             └─ engine.next()    ← comienza la cadena
@@ -90,7 +90,7 @@ Para añadir una nueva instrucción:
 {
     slotId:        'autosave',
     savedAt:       1234567890,     // Date.now()
-    currentFile:   'cap01/scene_01.ems',
+    currentFile:   'cap01/scene_01.dan',
     currentIndex:  4,              // instrucción donde se guardó
     flags:         { puzzle_solved: true, capitulo: 2 },
     inventory:     ['llave_maestra'],

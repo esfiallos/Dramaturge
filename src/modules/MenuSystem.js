@@ -15,10 +15,10 @@ export class MenuSystem {
 
     /**
      * @param {object} deps
-     * @param {EmersEngine}  deps.engine
+     * @param {Dramaturge}  deps.engine
      * @param {SaveManager}  deps.saveManager
      * @param {SceneManager} deps.sceneManager
-     * @param {MEAudio}      deps.audio
+     * @param {Audio}      deps.audio
      * @param {string}       deps.startScene   - Escena inicial (ej: 'cap01/scene_01')
      * @param {string}       deps.gameTitle     - Título del juego
      * @param {string}       deps.gameSubtitle  - Subtítulo / tagline
@@ -209,7 +209,7 @@ export class MenuSystem {
         this.audio.unlock?.();
 
         // Usar el autosave ya precargado — sin queries a Dexie en el clic
-        const target = this._autosave.currentFile.replace('.ems', '');
+        const target = this._autosave.currentFile.replace('.dan', '');
         const ok = await this.sceneManager.loadOnly(target);
         if (ok) {
             await this.engine.resumeFromState(this._autosave);
@@ -234,7 +234,7 @@ export class MenuSystem {
         this._hideMainMenu();
         this._closePause();
         this._showHUD();
-        await this.sceneManager.start(loaded.currentFile.replace('.ems', ''));
+        await this.sceneManager.start(loaded.currentFile.replace('.dan', ''));
         await this.engine.resumeFromState(loaded);
     }
 
@@ -340,7 +340,7 @@ export class MenuSystem {
                     if (!data) return;
                     this._closeSlots();
                     this._closePause();
-                    const target = data.currentFile.replace('.ems', '');
+                    const target = data.currentFile.replace('.dan', '');
                     const ok = await this.sceneManager.loadOnly(target);
                     if (ok) {
                         await this.engine.resumeFromState(data);

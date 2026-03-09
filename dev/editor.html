@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VEMN · Editor</title>
+    <title>Dramaturge · Editor</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -203,10 +203,10 @@
 <body>
 
     <div id="header">
-        <span class="logo">VEMN</span>
+        <span class="logo">Dramaturge</span>
         <div class="nav-sep"></div>
         <input id="filename" type="text" value="scene_01" spellcheck="false"
-               title="Nombre del archivo (sin .ems)">
+               title="Nombre del archivo (sin .dan)">
         <span id="saved-badge">✓ Guardado</span>
         <div class="spacer"></div>
 
@@ -214,11 +214,11 @@
         <a class="nav-link" href="/dev/debug.html" target="_blank">Debug</a>
         <div class="nav-sep"></div>
 
-        <label class="btn btn-outline" title="Cargar archivo .ems">
+        <label class="btn btn-outline" title="Cargar archivo .dan">
             ↑ Abrir
-            <input id="load-file" type="file" accept=".ems" style="display:none">
+            <input id="load-file" type="file" accept=".dan" style="display:none">
         </label>
-        <button class="btn btn-outline" id="btn-save" title="Guardar como .ems">↓ Guardar</button>
+        <button class="btn btn-outline" id="btn-save" title="Guardar como .dan">↓ Guardar</button>
         <div class="nav-sep"></div>
         <button class="btn btn-run" id="btn-run">▶ Run</button>
     </div>
@@ -229,7 +229,7 @@
             <div id="ems-highlight" aria-hidden="true"></div>
             <textarea id="ems-editor" spellcheck="false" autocomplete="off"
                       autocorrect="off" autocapitalize="off"
-                      placeholder="# Escribe tu script .ems aquí..."></textarea>
+                      placeholder="# Escribe tu script .dan aquí..."></textarea>
         </div>
     </div>
 

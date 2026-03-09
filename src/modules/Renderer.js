@@ -5,7 +5,7 @@
 //   [DOM Overlay]  → textbox, nombre, UI (z-index: 30+)
 //
 // CICLO DE VIDA OBLIGATORIO (PixiJS v8):
-//   const renderer = new MERenderer();
+//   const renderer = new Renderer();
 //   await renderer.init();            ← debe llamarse antes de cualquier otro método
 
 import { Application, Assets, Sprite, Container } from 'pixi.js';
@@ -60,7 +60,7 @@ const TW_SPEED            = 28;
 
 // ─── Clase principal ──────────────────────────────────────────────────────────
 
-export class MERenderer {
+export class Renderer {
 
     constructor() {
         // El constructor es SÍNCRONO.
@@ -70,7 +70,8 @@ export class MERenderer {
         // Referencias DOM — disponibles de inmediato, antes de init()
         this.nameEl  = document.getElementById('char-name');
         this.textEl  = document.getElementById('char-text');
-        this.textBox = document.getElementById('text-box');
+        this.textBox    = document.getElementById('text-box');
+        this.transition = document.getElementById('scene-transition');
 
         // Estado interno
         this.activeSprites = new Map();
@@ -81,6 +82,12 @@ export class MERenderer {
         this._twFullText = '';
         this._twOnDone   = null;
         this._twDone     = false;
+
+        // Bloqueo durante transición de modo — el Engine lo respeta en next()
+        this.isTransitioning = false;
+
+        // Lock post-skip: evita que un doble clic rápido salte el texto recién completado
+        this._skipLocked = false;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -88,7 +95,7 @@ export class MERenderer {
     // ─────────────────────────────────────────────────────────────────────────
 
     async init() {
-        const viewport = document.getElementById('emers-viewport');
+        const viewport = document.getElementById('viewport');
 
         // v8: opciones en init(), no en el constructor
         await this.app.init({
@@ -111,6 +118,24 @@ export class MERenderer {
         this.app.stage.addChild(this.bgLayer, this.spriteLayer);
 
         this.app.renderer.on('resize', () => this._onResize());
+
+        // ── Indicador de avance ───────────────────────────────────────────
+        // Triángulo parpadeante que aparece cuando el typewriter termina
+        this._advanceEl = document.createElement('span');
+        this._advanceEl.id = 'advance-indicator';
+        this._advanceEl.textContent = '▼';
+        this.textBox?.appendChild(this._advanceEl);
+
+        // Capa de fade DOM — cubre todo el viewport para transiciones
+        // de escena (goto fade:black / fade:white)
+        this._fadeLayer = document.createElement('div');
+        this._fadeLayer.style.cssText = [
+            'position:absolute', 'inset:0', 'z-index:25',
+            'pointer-events:none', 'opacity:0',
+            'transition:opacity 0ms linear',
+            'background:#000',
+        ].join(';');
+        viewport.appendChild(this._fadeLayer);
 
         console.log('[Renderer] PixiJS v8 inicializado.');
     }
@@ -205,15 +230,32 @@ export class MERenderer {
     // DIÁLOGO / TYPEWRITER
     // ─────────────────────────────────────────────────────────────────────────
 
-    typewriter(name, text, onDone) {
+    /**
+     * Inicia el efecto typewriter.
+     * Ahora es async — espera el crossfade de narración antes de empezar a escribir.
+     * El engine debe hacer: await renderer.typewriter(...)
+     */
+    async typewriter(name, text, onDone) {
         this._twFullText = text;
         this._twOnDone   = onDone;
         this._twDone     = false;
+        this._skipLocked = false;
 
         const isNarration = !name;
-        this._setNarrationMode(isNarration);
-        this.nameEl.innerText = isNarration ? '' : name;
+
+        // Ocultar indicador mientras escribe
+        this._setAdvance(false);
+
+        // Limpiar texto ANTES del crossfade — _setNarrationMode hace fade out
+        // primero (opacity 0), así el swap ocurre mientras la caja es invisible.
+        // Cubre todos los casos: diálogo→narrador, narrador→diálogo, puzzle→narrador, etc.
+        this.nameEl.innerText = '';
         this.textEl.innerText = '';
+
+        await this._setNarrationMode(isNarration);
+
+        // Nombre se fija después del crossfade, justo antes de empezar a escribir
+        this.nameEl.innerText = isNarration ? '' : name;
 
         let i = 0;
         clearInterval(this._twTimer);
@@ -223,6 +265,8 @@ export class MERenderer {
             if (i >= text.length) {
                 clearInterval(this._twTimer);
                 this._twDone = true;
+                // Mostrar indicador de avance cuando termina
+                this._setAdvance(true);
                 this._twOnDone?.();
             }
         }, TW_SPEED);
@@ -235,7 +279,20 @@ export class MERenderer {
         this._twTimer         = null;
         this.textEl.innerText = this._twFullText;
         this._twDone          = true;
+
+        // Lock breve: el usuario necesita ver el texto completo
+        // antes de poder avanzar al siguiente paso
+        this._skipLocked = true;
+        this._setAdvance(true);
+        setTimeout(() => { this._skipLocked = false; }, 180);
+
         this._twOnDone?.();
+    }
+
+    /** Muestra u oculta el indicador de avance (▼) */
+    _setAdvance(visible) {
+        if (!this._advanceEl) return;
+        this._advanceEl.classList.toggle('visible', visible);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -251,9 +308,157 @@ export class MERenderer {
         sprite.scale.set(targetH / sprite.texture.height);
     }
 
-    _setNarrationMode(active) {
-        this.textBox.classList.toggle('narration-mode', active);
-        this.spriteLayer.alpha = active ? 0.15 : 1;
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRANSICIÓN DE ESCENA
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Ejecuta una transición de pantalla completa entre escenas.
+     * Fade to color → callback → fade from color.
+     *
+     * @param {'black'|'white'} color - color del fundido
+     * @param {number}          ms    - duración de cada mitad (fade in + fade out)
+     * @returns {Promise<void>}       - resuelve cuando la transición completa
+     */
+    async sceneTransition(color = 'black', ms = 500) {
+        const overlay = this.transition;
+        if (!overlay) return;
+
+        overlay.style.background  = color === 'white' ? '#fff' : '#000';
+        overlay.style.transition  = `opacity ${ms}ms ease`;
+        overlay.classList.add('active');
+
+        // Fade IN (oscurece/blanquea la pantalla)
+        await new Promise(resolve => {
+            requestAnimationFrame(() => {
+                overlay.style.opacity = '1';
+                setTimeout(resolve, ms);
+            });
+        });
+
+        // El SceneManager carga la siguiente escena durante la pausa
+        // (el Engine ya llamó sceneLoader antes de llamar sceneTransition)
+        // Pequeña pausa en negro/blanco para que se sienta el corte narrativo
+        await new Promise(r => setTimeout(r, 80));
+
+        // Fade OUT (revela la nueva escena)
+        overlay.style.opacity = '0';
+        await new Promise(r => setTimeout(r, ms));
+
+        overlay.classList.remove('active');
+        overlay.style.transition = '';
+    }
+
+    /**
+     * Cambia entre modo diálogo y modo narración con crossfade suave.
+     * Ahora es async — el typewriter espera a que termine.
+     *
+     * @param {boolean} active   - true = narración, false = diálogo
+     * @param {number}  [ms=220] - duración del crossfade en ms
+     */
+    async _setNarrationMode(active, ms = 220) {
+        const box = this.textBox;
+
+        const already = box.classList.contains('narration-mode');
+        if (already === active) return;
+
+        // Fade out → swap clase → fade in
+        box.style.transition = `opacity ${ms}ms ease`;
+        box.style.opacity    = '0';
+
+        const targetAlpha = active ? 0.15 : 1;
+        this._tweenSpriteAlpha(targetAlpha, ms);
+
+        await new Promise(r => setTimeout(r, ms));
+        box.classList.toggle('narration-mode', active);
+        box.style.opacity = '1';
+        await new Promise(r => setTimeout(r, ms + 10));
+        box.style.transition = '';
+    }
+
+    /**
+     * Transición de modo narrador ↔ diálogo al estilo Umineko.
+     *
+     * Cuando el modo CAMBIA (narración→diálogo o diálogo→narración):
+     *   1. Bloquea el engine (isTransitioning = true)
+     *   2. Fade a blanco fullscreen en fadeMs
+     *   3. Pausa holdMs para que el jugador perciba el corte
+     *   4. Fade out del blanco
+     *   5. Desbloquea (isTransitioning = false)
+     *
+     * Si el modo NO cambia, resuelve inmediatamente sin efectos.
+     *
+     * @param {boolean} toNarration - true = vamos a narración, false = vamos a diálogo
+     * @param {number}  fadeMs      - duración del fade in/out (ms)
+     * @param {number}  holdMs      - tiempo en blanco antes del fade out (ms)
+     * @returns {Promise<void>}
+     */
+    async modeTransition(toNarration, fadeMs = 180, holdMs = 60) {
+        const alreadyNarration = this.textBox.classList.contains('narration-mode');
+
+        // Sin cambio de modo — nada que hacer
+        if (alreadyNarration === toNarration) return;
+
+        const overlay = this.transition;
+        if (!overlay) return;
+
+        this.isTransitioning = true;
+
+        // Preparar overlay blanco
+        overlay.style.background = '#ffffff';
+        overlay.style.transition  = `opacity ${fadeMs}ms ease`;
+        overlay.classList.add('active');
+
+        // Fade IN a blanco
+        await new Promise(resolve => {
+            requestAnimationFrame(() => {
+                overlay.style.opacity = '1';
+                setTimeout(resolve, fadeMs);
+            });
+        });
+
+        // Pantalla completamente blanca — limpiar texto anterior AHORA
+        // El usuario no puede ver el swap porque el overlay lo cubre
+        if (this.textEl)  this.textEl.innerText  = '';
+        if (this.nameEl)  this.nameEl.innerText  = '';
+        this._setAdvance(false);
+
+        // Pausa mínima en blanco antes de revelar
+        await new Promise(r => setTimeout(r, holdMs));
+
+        // El typewriter y el modo ya fueron actualizados por el Engine
+        // mientras estábamos en blanco — ahora revelamos
+
+        // Fade OUT del blanco
+        overlay.style.opacity = '0';
+        await new Promise(r => setTimeout(r, fadeMs));
+
+        overlay.classList.remove('active');
+        overlay.style.transition = '';
+        overlay.style.background = '';
+
+        this.isTransitioning = false;
+    }
+
+    /**
+     * Anima el alpha del spriteLayer suavemente.
+     * @param {number} target  - alpha destino (0.0–1.0)
+     * @param {number} ms      - duración en ms
+     */
+    _tweenSpriteAlpha(target, ms) {
+        const start     = this.spriteLayer.alpha;
+        const delta     = target - start;
+        const startTime = performance.now();
+
+        const tick = (now) => {
+            const t = Math.min((now - startTime) / ms, 1);
+            // Ease in-out cuadrático
+            const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+            this.spriteLayer.alpha = start + delta * ease;
+            if (t < 1) requestAnimationFrame(tick);
+        };
+
+        requestAnimationFrame(tick);
     }
 
     _destroySprite(actor) {
@@ -320,3 +525,6 @@ export class MERenderer {
         });
     }
 }
+
+/** Pequeña utilidad async para esperar ms — usada en animaciones DOM */
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

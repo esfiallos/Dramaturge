@@ -64,6 +64,60 @@ html, body {
 }
 
 /* Modo narración Umineko */
+/* ── Indicador de avance ────────────────────────────────────────────────────── */
+
+#advance-indicator {
+    position: absolute;
+    bottom: 1.6rem;
+    right: 10%;
+    font-size: 0.7rem;
+    color: var(--gold);
+    opacity: 0;
+    transform: translateY(-3px);
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+    animation: none;
+}
+
+#advance-indicator.visible {
+    opacity: 1;
+    animation: advance-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes advance-pulse {
+    0%, 100% { transform: translateY(-3px); opacity: 0.5; }
+    50%       { transform: translateY(2px);  opacity: 1;   }
+}
+
+/* En modo narración el indicador va centrado abajo */
+#text-box.narration-mode #advance-indicator {
+    right: 50%;
+    transform: translateX(50%) translateY(-3px);
+    bottom: 2.5rem;
+}
+
+@keyframes advance-pulse-narration {
+    0%, 100% { transform: translateX(50%) translateY(-3px); opacity: 0.5; }
+    50%       { transform: translateX(50%) translateY(2px);  opacity: 1;   }
+}
+
+#text-box.narration-mode #advance-indicator.visible {
+    animation: advance-pulse-narration 0.9s ease-in-out infinite;
+}
+
+/* ── Flash de clic ───────────────────────────────────────────────────────────── */
+/* Feedback inmediato cuando el usuario hace clic o presiona Space */
+
+#text-box.click-flash {
+    animation: click-flash 0.12s ease-out;
+}
+
+@keyframes click-flash {
+    0%   { background-color: inherit; }
+    40%  { background-color: rgba(201,168,76,0.06); }
+    100% { background-color: inherit; }
+}
+
 #text-box.narration-mode {
     position: absolute; inset: 0;
     display: flex; flex-direction: column;
@@ -95,6 +149,18 @@ html, body {
     font-style: italic; font-size: 1.85rem;
     line-height: 1.7; max-width: 800px;
     text-shadow: 0 2px 20px rgba(0,0,0,0.8);
+}
+
+/* ── Transición de escena ──────────────────────────────────────────────── */
+#scene-transition {
+    position: absolute; inset: 0; z-index: 25;
+    pointer-events: none;
+    opacity: 0;
+    background: #000; /* se cambia a blanco por JS si es fade:white */
+    transition: opacity 0s; /* timing controlado por JS */
+}
+#scene-transition.active {
+    pointer-events: all; /* bloquea clics durante la transición */
 }
 
 /* ── HUD ───────────────────────────────────────────────────────────────────── */

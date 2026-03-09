@@ -1,23 +1,24 @@
 // src/main.js
 // Bootstrap de PRODUCCIÓN.
 
-import { db }           from './core/database/db.js';
-import { EmersEngine }  from './core/Engine.js';
-import { EParser }      from './core/parser/Parser.js';
-import { MERenderer }   from './modules/Renderer.js';
-import { MEAudio }      from './modules/Audio.js';
-import { GameState }    from './core/State.js';
-import { SaveManager }  from './core/SaveManager.js';
-import { PuzzleSystem } from './modules/PuzzleSystem.js';
-import { SceneManager } from './core/SceneManager.js';
-import { MenuSystem }   from './modules/MenuSystem.js';
+import { db }             from './core/database/db.js';
+import { seedProductionDB } from './core/database/seed.js';
+import { Dramaturge }    from './core/Engine.js';
+import { KParser }       from './core/parser/Parser.js';
+import { Renderer }      from './modules/Renderer.js';
+import { AudioManager }         from './modules/Audio.js';
+import { GameState }     from './core/State.js';
+import { SaveManager }   from './core/SaveManager.js';
+import { PuzzleSystem }  from './modules/PuzzleSystem.js';
+import { SceneManager }  from './core/SceneManager.js';
+import { MenuSystem }    from './modules/MenuSystem.js';
 
-const renderer    = new MERenderer();
-const audio       = new MEAudio();
-const parser      = new EParser();
+const renderer    = new Renderer();
+const audio       = new AudioManager();
+const parser      = new KParser();
 const state       = new GameState();
 const saveManager = new SaveManager(db);
-const engine      = new EmersEngine(db, renderer, audio, state, saveManager);
+const engine      = new Dramaturge(db, renderer, audio, state, saveManager);
 const sceneManager = new SceneManager(engine, parser);
 
 // Resolvers inyectados — el Engine no importa estos módulos directamente
@@ -32,21 +33,33 @@ const menu = new MenuSystem({
     sceneManager,
     audio,
     startScene:   'cap01/scene_01',
-    gameTitle:    'EMERS ENGINE',     // ← cambiar por el título del juego
+    gameTitle:    'DRAMATURGE',     // ← cambiar por el título del juego
     gameSubtitle: 'Cada secreto tiene su precio',
 });
 
 document.getElementById('click-zone')
     ?.addEventListener('click', (e) => {
-        // Ignorar clics que vienen de botones de UI (HUD, menú)
-        // para evitar que el bubbling dispare next() accidentalmente
         if (e.target.closest('button, #hud, #pause-menu, #main-menu')) return;
         engine.next();
     });
 
+// ── Avance por teclado (Space) ────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space') return;
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+    const mainMenu  = document.getElementById('main-menu');
+    const pauseMenu = document.getElementById('pause-menu');
+    if (!mainMenu?.classList.contains('hidden'))  return;
+    if (pauseMenu?.classList.contains('visible')) return;
+    e.preventDefault();
+    engine.next();
+});
+
 async function init() {
     await renderer.init();
-    await menu.init(); // muestra el menú principal
+    await seedProductionDB(db); // no-op si la DB ya tiene datos
+    await menu.init();
 }
 
 init();

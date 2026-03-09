@@ -26,9 +26,9 @@
     -->
 
     <!-- ── VIEWPORT (canvas PIXI + overlay de juego) ─────────────────────── -->
-    <div id="emers-viewport">
+    <div id="viewport">
 
-        <!-- Canvas PIXI se inyecta aquí por MERenderer.init() -->
+        <!-- Canvas PIXI se inyecta aquí por Renderer.init() -->
 
         <!-- Puzzle overlay -->
         <div id="puzzle-overlay">
@@ -54,7 +54,9 @@
             <button class="hud-btn hud-btn--exit" id="btn-exit">Salir</button>
         </div>
 
-    </div><!-- /#emers-viewport -->
+        <!-- Overlay de transición entre escenas -->
+        <div id="scene-transition"></div>
+    </div><!-- /#viewport -->
 
 
     <!-- ── MENÚ DE PAUSA ─────────────────────────────────────────────────── -->

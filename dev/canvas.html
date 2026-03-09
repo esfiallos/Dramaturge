@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>VEMN · Canvas</title>
+    <title>Dramaturge · Canvas</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=Crimson+Pro:ital,wght@0,300;0,400;1,300;1,400&display=swap');
 
@@ -69,7 +69,7 @@
         }
 
         /* ── Viewport ────────────────────────────────────────────────────── */
-        #emers-viewport {
+        #viewport {
             position: fixed; inset: 44px 0 0 0;
         }
 
@@ -167,6 +167,40 @@
         .puzzle-result--pass { border: 1px solid rgba(120,190,130,0.3); background: rgba(120,190,130,0.07); color: #78be82; }
         .puzzle-result--fail { border: 1px solid rgba(190,90,90,0.3); background: rgba(190,90,90,0.07); color: #be5a5a; }
 
+        /* ── Indicador de avance ─────────────────────────────────────────── */
+        #advance-indicator {
+            position: absolute; bottom: 1.6rem; right: 10%;
+            font-size: 0.7rem; color: var(--gold);
+            opacity: 0; transform: translateY(-3px);
+            transition: opacity 0.2s ease;
+            pointer-events: none;
+        }
+        #advance-indicator.visible {
+            opacity: 1;
+            animation: advance-pulse 0.9s ease-in-out infinite;
+        }
+        @keyframes advance-pulse {
+            0%, 100% { transform: translateY(-3px); opacity: 0.5; }
+            50%       { transform: translateY(2px);  opacity: 1;   }
+        }
+        #text-box.narration-mode #advance-indicator {
+            right: 50%; bottom: 2.5rem;
+            transform: translateX(50%) translateY(-3px);
+        }
+        #text-box.narration-mode #advance-indicator.visible {
+            animation: advance-pulse-narration 0.9s ease-in-out infinite;
+        }
+        @keyframes advance-pulse-narration {
+            0%, 100% { transform: translateX(50%) translateY(-3px); opacity: 0.5; }
+            50%       { transform: translateX(50%) translateY(2px);  opacity: 1;   }
+        }
+        #text-box.click-flash { animation: click-flash 0.12s ease-out; }
+        @keyframes click-flash {
+            0%   { background-color: inherit; }
+            40%  { background-color: rgba(201,168,76,0.06); }
+            100% { background-color: inherit; }
+        }
+
         /* Error splash si no hay script */
         #no-script {
             display: none;
@@ -184,7 +218,7 @@
 <body>
 
     <div id="canvas-hud">
-        <span class="hud-label">VEMN Canvas</span>
+        <span class="hud-label">Dramaturge · Canvas</span>
         <span id="hud-filename">—</span>
         <div class="spacer"></div>
         <span id="hud-step">— / —</span>
@@ -193,7 +227,7 @@
         <button class="hud-btn hud-btn--close" id="btn-close">✕ Cerrar</button>
     </div>
 
-    <div id="emers-viewport">
+    <div id="viewport">
         <div id="puzzle-overlay">
             <div id="puzzle-card">
                 <div id="puzzle-title"></div>
@@ -201,6 +235,7 @@
                 <div id="puzzle-interaction"></div>
             </div>
         </div>
+        <div id="scene-transition" style="position:absolute;inset:0;z-index:25;pointer-events:none;opacity:0;background:#000;"></div>
         <div id="click-zone">
             <div id="text-box">
                 <div id="char-name"></div>

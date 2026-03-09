@@ -12,7 +12,7 @@ Hoja de ruta del proyecto. Ordenado por prioridad de implementación.
 - [x] Audio con 3 canales (bgm, voice, se) + multi-formato (mp3/ogg, webp/png/jpg)
 - [x] GameState + SaveManager (Dexie + export/import JSON)
 - [x] PuzzleSystem (MULTIPLE_CHOICE, FREE_TEXT, INVENTORY)
-- [x] SceneManager (fetch .ems, caché, loadOnly para continuar)
+- [x] SceneManager (fetch .dan, caché, loadOnly para continuar)
 - [x] MenuSystem (splash, pausa, slots, precarga de saves)
 - [x] Laboratorio de desarrollo (`/dev/`)
 - [x] Sistema de diseño completo (Cinzel + Crimson Pro, tokens CSS)

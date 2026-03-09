@@ -1,32 +1,32 @@
 // dev/canvas.js
 // Sandbox del engine para el canvas de desarrollo.
-// Lee el script de localStorage['vemn_script'] y lo ejecuta.
-// Emite estado al debug vía BroadcastChannel('vemn-debug').
+// Lee el script de localStorage['dan_script'] y lo ejecuta.
+// Emite estado al debug vía BroadcastChannel('dan-debug').
 
 import { db }           from '../src/core/database/db.js';
-import { EmersEngine }  from '../src/core/Engine.js';
-import { EParser }      from '../src/core/parser/Parser.js';
-import { MERenderer }   from '../src/modules/Renderer.js';
-import { MEAudio }      from '../src/modules/Audio.js';
+import { Dramaturge }  from '../src/core/Engine.js';
+import { KParser }      from '../src/core/parser/Parser.js';
+import { Renderer }   from '../src/modules/Renderer.js';
+import { AudioManager }      from '../src/modules/Audio.js';
 import { GameState }    from '../src/core/State.js';
 import { PuzzleSystem } from '../src/modules/PuzzleSystem.js';
 
 // ─── Canal de debug ────────────────────────────────────────────────────────
-const debugChannel = new BroadcastChannel('vemn-debug');
+const debugChannel = new BroadcastChannel('dan-debug');
 
 function emitDebug(type, payload) {
     debugChannel.postMessage({ type, payload, ts: Date.now() });
 }
 
 // ─── Leer script ──────────────────────────────────────────────────────────
-const script   = localStorage.getItem('vemn_script') ?? '';
-const filename = localStorage.getItem('vemn_filename') ?? 'script';
+const script   = localStorage.getItem('dan_script') ?? '';
+const filename = localStorage.getItem('dan_filename') ?? 'script';
 
-document.getElementById('hud-filename').textContent = `${filename}.ems`;
+document.getElementById('hud-filename').textContent = `${filename}.dan`;
 
 if (!script.trim()) {
     document.getElementById('no-script').style.display = 'flex';
-    document.getElementById('emers-viewport').style.display = 'none';
+    document.getElementById('viewport').style.display = 'none';
     emitDebug('error', { message: 'No hay script en localStorage.' });
 } else {
     boot();
@@ -34,11 +34,11 @@ if (!script.trim()) {
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────
 async function boot() {
-    const renderer    = new MERenderer();
-    const audio       = new MEAudio();
-    const parser      = new EParser();
+    const renderer    = new Renderer();
+    const audio       = new AudioManager();
+    const parser      = new KParser();
     const state       = new GameState();
-    const engine      = new EmersEngine(db, renderer, audio, state);
+    const engine      = new Dramaturge(db, renderer, audio, state);
     const puzzleSystem = new PuzzleSystem(db, state);
 
     engine.puzzleResolver = (id) => puzzleSystem.open(id);
@@ -49,6 +49,15 @@ async function boot() {
             if (e.target.closest('#puzzle-overlay, #canvas-hud')) return;
             engine.next();
         });
+
+    // Space también avanza en el canvas
+    document.addEventListener('keydown', (e) => {
+        if (e.code !== 'Space') return;
+        const tag = document.activeElement?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+        e.preventDefault();
+        engine.next();
+    });
 
     // Reset
     document.getElementById('btn-reset-canvas')

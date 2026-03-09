@@ -176,10 +176,10 @@ async function saveForm() {
 async function logAll() {
     const chars = await db.characters.toArray();
     if (chars.length === 0) {
-        console.log('[VEMN] No hay personajes en la DB.');
+        console.log('[Dramaturge] No hay personajes en la DB.');
         return;
     }
-    console.group(`[VEMN] ${chars.length} personaje(s):`);
+    console.group(`[Dramaturge] ${chars.length} personaje(s):`);
     chars.forEach(c => {
         console.group(`  ▸ ${c.name} (${c.id})`);
         console.log(`    basePath:    ${c.basePath}`);
@@ -191,10 +191,10 @@ async function logAll() {
     console.groupEnd();
 }
 
-// Exponer en consola: __vemn.logChars()
-window.__vemn = window.__vemn ?? {};
-window.__vemn.logChars = logAll;
-console.log('[VEMN] Tip: __vemn.logChars() para ver todos los personajes en consola.');
+// Exponer en consola: __dramaturge.logChars()
+window.__dramaturge = window.__dramaturge ?? {};
+window.__dramaturge.logChars = logAll;
+console.log('[Dramaturge] Tip: __dramaturge.logChars() para ver todos los personajes en consola.');
 
 // ─── Eventos ──────────────────────────────────────────────────────────────
 document.getElementById('btn-new')?.addEventListener('click', () => openForm());

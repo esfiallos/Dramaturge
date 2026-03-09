@@ -9,8 +9,8 @@
 export class GameState {
     constructor(data = {}) {
         // ── Progreso narrativo ────────────────────────────────────────────
-        // Nombre del archivo .ems activo (para cargar el script correcto al reanudar)
-        this.currentFile  = data.currentFile  ?? 'inicio.ems';
+        // Nombre del archivo .dan activo (para cargar el script correcto al reanudar)
+        this.currentFile  = data.currentFile  ?? 'inicio.dan';
 
         // Índice de la próxima instrucción a ejecutar.
         // Se sincroniza con engine.currentIndex antes de cada save.

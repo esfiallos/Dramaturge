@@ -1,7 +1,7 @@
 // src/core/database/db.js
 import Dexie from 'dexie';
 
-export const db = new Dexie('EmersEngineDB');
+export const db = new Dexie('DramaturgeDB');
 
 // ─── CONTRATO DE DATOS ────────────────────────────────────────────────────────
 //

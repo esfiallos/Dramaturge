@@ -32,7 +32,7 @@ const AUDIO_BASE = {
  *   1. Si el param ya es una ruta absoluta ('/assets/...'), se usa directo.
  *   2. Si no, se añade el prefijo del canal (bgm/voice/se).
  *   3. Si no tiene extensión, se prueba mp3 → ogg via HEAD request.
- * @param {string} param   - Valor del param del script ('.ems')
+ * @param {string} param   - Valor del param del script ('.dan')
  * @param {string} channel - 'bgm' | 'voice' | 'se'
  */
 async function resolveAudioPath(param, channel = 'bgm') {
@@ -53,7 +53,7 @@ async function resolveAudioPath(param, channel = 'bgm') {
     return `${path}.mp3`; // fallback
 }
 
-export class MEAudio {
+export class AudioManager {
     constructor() {
         // Cada canal es un HTMLAudioElement independiente
         this._bgm   = new Audio();

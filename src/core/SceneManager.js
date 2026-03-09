@@ -1,7 +1,7 @@
 // src/core/SceneManager.js
 //
 // RESPONSABILIDADES:
-//   - Cargar archivos .ems desde /public/scripts/ vía fetch
+//   - Cargar archivos .dan desde /public/scripts/ vía fetch
 //   - Parsear el script y entregarlo al Engine
 //   - Ser el handler de goto (inyectado como engine.sceneLoader)
 //
@@ -11,8 +11,8 @@
 //   3. Inicia:       await sceneManager.start('cap01/scene_01')
 //
 // CONVENCIÓN DE RUTAS:
-//   target 'cap01/scene_02' → fetch('/scripts/cap01/scene_02.ems')
-//   target 'intro'          → fetch('/scripts/intro.ems')
+//   target 'cap01/scene_02' → fetch('/scripts/cap01/scene_02.dan')
+//   target 'intro'          → fetch('/scripts/intro.dan')
 //
 // El SceneManager NO conoce al Renderer ni al Audio.
 // Solo coordina Engine + Parser + sistema de archivos.
@@ -20,8 +20,8 @@
 export class SceneManager {
 
     /**
-     * @param {EmersEngine} engine   - Instancia del motor
-     * @param {EParser}     parser   - Instancia del parser
+     * @param {Dramaturge} engine   - Instancia del motor
+     * @param {KParser}     parser   - Instancia del parser
      * @param {string}      basePath - Ruta base de los scripts (default: '/scripts/')
      */
     constructor(engine, parser, basePath = '/scripts/') {
@@ -74,7 +74,7 @@ export class SceneManager {
             this._cache.set(target, instructions);
         }
 
-        this.engine.state.currentFile = `${target}.ems`;
+        this.engine.state.currentFile = `${target}.dan`;
         await this.engine.loadScript(instructions);
         return true;
     }
@@ -110,7 +110,7 @@ export class SceneManager {
         }
 
         // 2. Actualizar state con la escena activa
-        this.engine.state.currentFile = `${target}.ems`;
+        this.engine.state.currentFile = `${target}.dan`;
 
         // 3. Cargar en el engine y arrancar
         await this.engine.loadScript(instructions);
@@ -118,12 +118,12 @@ export class SceneManager {
     }
 
     /**
-     * Descarga un archivo .ems del servidor.
+     * Descarga un archivo .dan del servidor.
      * @param   {string}      target
      * @returns {string|null} Contenido del archivo, o null si no se encontró
      */
     async _fetch(target) {
-        const url = `${this.basePath}${target}.ems`;
+        const url = `${this.basePath}${target}.dan`;
 
         try {
             const response = await fetch(url);

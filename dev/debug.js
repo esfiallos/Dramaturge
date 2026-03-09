@@ -12,7 +12,7 @@ let currentIndex    = 0;
 let connected       = false;
 
 // ─── BroadcastChannel ─────────────────────────────────────────────────────
-const ch = new BroadcastChannel('vemn-debug');
+const ch = new BroadcastChannel('dan-debug');
 
 ch.addEventListener('message', (e) => {
     const { type, payload, ts } = e.data;
@@ -186,13 +186,13 @@ document.getElementById('clear-log').addEventListener('click', () => {
 
 // ─── Cargar instrucciones del último script si existen ───────────────────
 // Permite abrir debug.html antes del canvas y ver el script parseado
-const savedScript = localStorage.getItem('vemn_script');
+const savedScript = localStorage.getItem('dan_script');
 if (savedScript) {
     import('./editor.js').catch(() => {});
     // Solo parsear sin ejecutar para preview
-    import('../src/core/parser/Parser.js').then(({ EParser }) => {
+    import('../src/core/parser/Parser.js').then(({ KParser }) => {
         try {
-            const parser = new EParser();
+            const parser = new KParser();
             allInstructions = parser.parse(savedScript);
             renderInstructions();
             instCount.textContent = `${allInstructions.length} inst. (sin canvas)`;

@@ -3,7 +3,7 @@
 import { Character } from './models/Character.js';
 import { GameState } from './State.js';
 
-export class EmersEngine {
+export class Dramaturge {
     /**
      * @param {object}      db           - Instancia de Dexie
      * @param {MERenderer}  renderer     - Módulo de render
@@ -24,6 +24,7 @@ export class EmersEngine {
         this.instructions = [];
         this.currentIndex = 0;
         this.isBlocked    = false;
+        this._lastTextMode = null; // 'narrate' | 'dialogue' | null — para detectar cambios de modo
 
         // Callbacks externos — se inyectan después de instanciar el Engine.
         //
@@ -59,7 +60,17 @@ export class EmersEngine {
     }
 
     async next() {
+        // No procesar mientras el overlay de transición de modo está activo
+        if (this.renderer.isTransitioning) return;
+
         if (this.isBlocked) {
+            // Si el skip acaba de completar el texto, dar feedback visual
+            // pero respetar el lock de 180ms para que el usuario lo lea
+            if (this.renderer._skipLocked) {
+                this.renderer.flashTextBox?.();
+                return;
+            }
+            this.renderer.flashTextBox?.();
             this.renderer.skipTypewriter?.();
             return;
         }
@@ -145,6 +156,13 @@ export class EmersEngine {
             case 'DIALOGUE': {
                 const pawn = this.activePawns.get(inst.actor);
 
+                // Transición de modo si veníamos de narración
+                // modeTransition bloquea con overlay blanco mientras el modo cambia
+                if (this._lastTextMode === 'narrate') {
+                    await this.renderer.modeTransition(false);
+                }
+                this._lastTextMode = 'dialogue';
+
                 if (inst.pose && pawn) {
                     const posePath  = pawn.getSprite(inst.pose);
                     const actorSlot = this._getActorSlot(inst.actor);
@@ -166,7 +184,12 @@ export class EmersEngine {
             }
 
             case 'NARRATE': {
-                // null como nombre activa el modo narración full-screen en el Renderer
+                // Transición de modo si veníamos de diálogo normal
+                if (this._lastTextMode === 'dialogue') {
+                    await this.renderer.modeTransition(true);
+                }
+                this._lastTextMode = 'narrate';
+
                 this.isBlocked = true;
 
                 await this.renderer.typewriter(null, inst.text, () => {
@@ -211,6 +234,9 @@ export class EmersEngine {
 
                 // Mostrar resultado como narración — desbloquea al hacer clic
                 const resultText = passed ? inst.passText : inst.failText;
+                // El resultado del puzzle usa modo narrador
+                this._lastTextMode = 'narrate';
+
                 await this.renderer.typewriter(null, resultText, () => {
                     this.isBlocked = false;
                     this._syncStateAndSave();
@@ -219,17 +245,25 @@ export class EmersEngine {
             }
 
             case 'GOTO': {
-                // Actualizar state antes de saltar
                 this._syncState();
 
-                if (this.sceneLoader) {
-                    // SceneManager carga el script, llama loadScript() + next()
-                    // El engine no vuelve aquí — el flujo continúa en la nueva escena
-                    await this.sceneLoader(inst.target);
-                } else {
-                    // Sin SceneManager (ej: en el lab) — solo loguea
+                if (!this.sceneLoader) {
                     this.state.currentFile = `${inst.target}.ems`;
-                    console.log(`[Engine] GOTO → "${inst.target}.ems". Sin SceneManager: detenido.`);
+                    console.log(`[Engine] GOTO → "${inst.target}.dan". Sin SceneManager: detenido.`);
+                    break;
+                }
+
+                if (inst.transition && this.renderer?.sceneTransition) {
+                    // Fase 1: fade IN (oscurece la pantalla, ~480ms)
+                    // Cargamos la escena mientras la pantalla está oscura/blanca
+                    // para que el jugador nunca vea el swap de assets.
+                    const halfMs = 480;
+                    this.renderer.sceneTransition(inst.transition, halfMs); // no await — corre en paralelo
+                    await new Promise(r => setTimeout(r, halfMs));          // esperar que tape la pantalla
+                    await this.sceneLoader(inst.target);                    // cargar nueva escena
+                    // Fase 2: el fade OUT lo completa sceneTransition internamente
+                } else {
+                    await this.sceneLoader(inst.target);
                 }
                 break;
             }
