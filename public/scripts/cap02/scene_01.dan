@@ -1,0 +1,87 @@
+# ══════════════════════════════════════════════════════
+# cap02/scene_01.dan
+# Prueba totalizadora — Capítulo 2
+# Cubre: continuación de flags del cap anterior,
+#        if inventory.has, puzzle FREE_TEXT,
+#        puzzle INVENTORY, audio.se, múltiples poses,
+#        hide con efecto, narración extendida
+# ══════════════════════════════════════════════════════
+
+pawn valeria, miki
+
+# ── Nueva escena, nuevo fondo ─────────────────────────
+bg.set forest fade 2s
+audio.bgm play[track_01] 0.35
+
+narrate "La mansión Voss llevaba décadas abandonada. Nadie entraba por voluntad propia."
+
+narrate "Valeria entró."
+
+show valeria:neutral at center fade
+
+# ── Reacción según lo que pasó en cap01 ──────────────
+if flag.miki_confio == true
+     valeria:neutral "Miki dijo que la respuesta estaba aquí. Confío en eso."
+else
+     valeria:triste "Vine sola. Supongo que así tenía que ser."
+endif
+
+# ── Exploración con narración ─────────────────────────
+narrate "Las paredes guardaban retratos de una familia que el pueblo prefería olvidar. Cada rostro miraba desde el mismo ángulo. Como si todos supieran algo."
+
+valeria:neutral "Aldric. Ese nombre aparece en todos los marcos." [001]
+
+# ── Puzzle de texto libre — el nombre del fundador ───
+audio.se play[rain_ambience] 0.5
+puzzle P02 pass:"El nombre resonó en la sala como si las paredes lo reconocieran." fail:"Silencio. No era ese el nombre que buscaba la mansión."
+
+if flag.P02_result == true
+    set flag.conoce_aldric = true
+    narrate "Algo se desbloqueó. No una puerta — una memoria que no era suya."
+    valeria:sorpresa "¿Cómo sé ese nombre? Nunca lo había escuchado."
+else
+    set flag.conoce_aldric = false
+    narrate "La respuesta incorrecta no abrió nada. Pero tampoco cerró todo."
+    valeria:triste "Me estoy perdiendo algo importante."
+endif
+
+# ── Miki aparece si hubo confianza en cap01 ──────────
+if flag.miki_confio == true
+    show miki:neutral at right slide
+    miki:neutral "Te dije que estarías aquí. ¿Encontraste la sala del reloj?"
+    valeria:neutral "Acabo de llegar, Miki."
+    miki:neutral "El reloj de la entrada lleva parado desde 1947. La llave que encontraste..."
+    valeria:sorpresa "¿Cómo sabes lo de la llave?"
+    miki:neutral "Porque yo la puse ahí."
+    wait 0.6s
+    hide miki fade
+    narrate "Valeria se quedó sola con esa respuesta. Algunas verdades son más pesadas cuando vienen de alguien de confianza."
+endif
+
+# ── Puzzle de inventario — usar la llave ─────────────
+audio.se play[rain_ambience] 0.3
+
+valeria:neutral "El reloj. Tiene una ranura del tamaño exacto de esta llave."
+
+if inventory.has llave_maestra
+    puzzle P03 pass:"El mecanismo cedió. Detrás del reloj, un pasadizo." fail:"La llave no giró. Algo bloqueaba el mecanismo desde adentro."
+else
+    narrate "La ranura estaba ahí, esperando algo que Valeria no tenía."
+    valeria:triste "Necesito encontrar la llave primero."
+endif
+
+# ── Final del capítulo según estado acumulado ────────
+if flag.P03_result == true
+    narrate "El pasadizo descendía hacia algo que ningún mapa de la mansión mostraba. Hacia la respuesta que llevaba décadas enterrada."
+    set flag.pasadizo_abierto = true
+    valeria:sorpresa "Ahí estás. Finalmente."
+else
+    narrate "La mansión guardó su secreto un día más. Pero Valeria sabía ahora dónde buscar."
+    valeria:triste "Volveré. Y esta vez traeré lo que necesito."
+endif
+
+set flag.cap02_completo = true
+
+wait 1s
+
+narrate "Aldenmoor guarda sus muertos con cuidado. Pero los vivos son más difíciles de contener."

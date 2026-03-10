@@ -26,6 +26,24 @@ export class Dramaturge {
         this.isBlocked    = false;
         this._lastTextMode = null; // 'narrate' | 'dialogue' | null — para detectar cambios de modo
 
+        // ── Modos de lectura ──────────────────────────────────────────────
+        // Auto: avanza solo cuando el typewriter termina (con delay)
+        // Skip: avanza instantáneamente, solo en líneas ya vistas
+        this.autoMode      = false;
+        this.skipMode      = false;
+        this.autoDelay     = 1800;  // ms entre líneas en modo auto (configurable)
+        this._autoTimer    = null;
+        // highWaterMark: índice más alto que el jugador ha completado.
+        // Suficiente para skip en historias lineales con finales por flags/inventario.
+        // No necesita ser un Set — ahorra memoria y escrituras en DB.
+        this.highWaterMark  = 0;
+        this._nextRunning   = false; // guard de re-entrancia para next()
+
+        // ── Backlog ───────────────────────────────────────────────────────
+        // Array de { speaker: string|null, text: string } — últimas 80 entradas.
+        // speaker es null para narraciones.
+        this.backlog = [];
+
         // Callbacks externos — se inyectan después de instanciar el Engine.
         //
         // Firma: (puzzleId: string) => Promise<boolean>
@@ -43,6 +61,39 @@ export class Dramaturge {
     // API PÚBLICA
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Resetea el engine completamente para una partida nueva.
+     * Limpia: state narrativo, pawns, backlog, renderer visual, timers.
+     * Conserva: preferencias de audio (viven en state.audioSettings).
+     */
+    reset() {
+        // Estado narrativo
+        this.state.reset();
+        this.highWaterMark  = 0;
+        this.currentIndex   = 0;
+        this.instructions   = [];
+        this._lastTextMode  = null;
+        this._nextRunning   = false;
+
+        // Modos de lectura
+        this.autoMode = false;
+        this.skipMode = false;
+        clearTimeout(this._autoTimer);
+        this.renderer._instantText = false;
+        this._skipOnStop = null;
+
+        // Personajes instanciados
+        this.activePawns.clear();
+
+        // Backlog de la sesión
+        this.backlog = [];
+
+        // Renderer: limpiar escena visual
+        this.renderer.clearScene?.();
+
+        console.log('[Engine] Reset completo. Partida nueva.');
+    }
+
     async loadScript(parsedInstructions) {
         this.instructions = parsedInstructions;
         this.currentIndex = 0;
@@ -52,6 +103,8 @@ export class Dramaturge {
     async resumeFromState(loadedState) {
         this.state        = loadedState;
         this.currentIndex = loadedState.currentIndex;
+        // Restaurar hasta dónde llegó el jugador (para skip)
+        this.highWaterMark = loadedState.highWaterMark ?? 0;
 
         // ── Restaurar audio ───────────────────────────────────────────────
         const { bgmVolume, sfxVolume, voiceVolume } = loadedState.audioSettings;
@@ -95,13 +148,14 @@ export class Dramaturge {
         console.log(`[Engine] Reanudando desde índice ${this.currentIndex}. Visual restaurado.`);
     }
 
+    // next() público — punto de entrada para input del usuario.
+    // Guard de re-entrancia: si ya está corriendo, el clic extra se descarta.
+    // Las llamadas internas del engine usan _nextInternal() directamente.
     async next() {
-        // No procesar mientras el overlay de transición de modo está activo
-        if (this.renderer.isTransitioning) return;
+        if (this._nextRunning) return;
 
+        // Si hay texto activo: skip o flash de feedback
         if (this.isBlocked) {
-            // Si el skip acaba de completar el texto, dar feedback visual
-            // pero respetar el lock de 180ms para que el usuario lo lea
             if (this.renderer._skipLocked) {
                 this.renderer.flashTextBox?.();
                 return;
@@ -111,6 +165,18 @@ export class Dramaturge {
             return;
         }
 
+        this._nextRunning = true;
+        try {
+            await this._nextInternal();
+        } finally {
+            this._nextRunning = false;
+        }
+    }
+
+    // _nextInternal() — avance real del script.
+    // Se llama recursivamente desde execute() para instrucciones no-bloqueantes.
+    async _nextInternal() {
+
         if (this.currentIndex >= this.instructions.length) {
             console.log('[Engine] Fin del script.');
             return;
@@ -118,8 +184,21 @@ export class Dramaturge {
 
         const inst = this.instructions[this.currentIndex];
         this.currentIndex++;
+
+        // Skip mode: si esta instrucción ya fue vista, el typewriter será instantáneo
+        // (renderer._instantText = true). _syncStateAndSave lo relanzará automáticamente.
+        if (this.skipMode && (this.currentIndex - 1) <= this.highWaterMark) {
+            const isText = inst.type === 'DIALOGUE' || inst.type === 'NARRATE';
+            if (isText) this.renderer._instantText = true;
+        }
+
         await this.execute(inst);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DESPACHADOR CENTRAL
+    // ─────────────────────────────────────────────────────────────────────────
+
 
     // ─────────────────────────────────────────────────────────────────────────
     // DESPACHADOR CENTRAL
@@ -141,7 +220,7 @@ export class Dramaturge {
                         console.error(`[Engine] ERROR: personaje "${id}" no existe en la DB.`);
                     }
                 }
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
@@ -157,7 +236,7 @@ export class Dramaturge {
                 await this.renderer.renderSprite(inst.actor, path, inst.slot, inst.effect);
                 // Persistir sprite activo para restaurar al cargar
                 this.state.visualState.sprites[inst.slot] = { actorId: inst.actor, path };
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
@@ -168,7 +247,7 @@ export class Dramaturge {
                     this.slots[slot] = null;
                     delete this.state.visualState.sprites[slot]; // ← limpiar del state
                 }
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
@@ -177,7 +256,7 @@ export class Dramaturge {
             case 'BG_CHANGE': {
                 await this.renderer.changeBackground(inst.target, inst.effect, inst.time);
                 this.state.visualState.bg = inst.target; // ← persistir fondo activo
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
@@ -187,7 +266,7 @@ export class Dramaturge {
                 } else if (inst.audioType === 'se') {
                     this.audio.playSE(inst.param, parseFloat(inst.vol ?? 0.8));
                 }
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
@@ -217,6 +296,10 @@ export class Dramaturge {
                 this.isBlocked    = true;
                 const speakerName = pawn ? pawn.name : inst.actor;
 
+                // Añadir al backlog (máx 80 entradas — FIFO)
+                this.backlog.push({ speaker: speakerName, text: inst.text });
+                if (this.backlog.length > 80) this.backlog.shift();
+
                 await this.renderer.typewriter(speakerName, inst.text, () => {
                     this.isBlocked = false;
                     this._syncStateAndSave();
@@ -233,6 +316,10 @@ export class Dramaturge {
 
                 this.isBlocked = true;
 
+                // Añadir al backlog
+                this.backlog.push({ speaker: null, text: inst.text });
+                if (this.backlog.length > 80) this.backlog.shift();
+
                 await this.renderer.typewriter(null, inst.text, () => {
                     this.isBlocked = false;
                     this._syncStateAndSave();
@@ -243,11 +330,14 @@ export class Dramaturge {
             // ── Control de flujo ───────────────────────────────────────────────
 
             case 'WAIT': {
-                const ms = this._parseDuration(inst.duration);
-                this.isBlocked = true;
-                await new Promise(resolve => setTimeout(resolve, ms));
-                this.isBlocked = false;
-                await this.next();
+                // En skip mode no esperamos — el jugador ya vio esta escena
+                if (!this.skipMode) {
+                    const ms = this._parseDuration(inst.duration);
+                    this.isBlocked = true;
+                    await new Promise(resolve => setTimeout(resolve, ms));
+                    this.isBlocked = false;
+                }
+                await this._nextInternal();
                 break;
             }
 
@@ -314,21 +404,21 @@ export class Dramaturge {
             case 'SET_FLAG': {
                 this.state.setFlag(inst.key, inst.value);
                 console.log(`[Engine] Flag "${inst.key}" = ${inst.value}`);
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
             case 'INVENTORY_ADD': {
                 this.state.addItem(inst.item);
                 console.log(`[Engine] Inventario: añadido "${inst.item}".`);
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
             case 'INVENTORY_REMOVE': {
                 this.state.removeItem(inst.item);
                 console.log(`[Engine] Inventario: eliminado "${inst.item}".`);
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
@@ -340,21 +430,86 @@ export class Dramaturge {
                 if (!passes) {
                     this.currentIndex = inst.targetIndex;
                 }
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
             case 'JUMP': {
                 // Salto incondicional (generado por el bloque else)
                 this.currentIndex = inst.targetIndex;
-                await this.next();
+                await this._nextInternal();
                 break;
             }
 
             default: {
                 console.warn(`[Engine] Instrucción no reconocida: "${inst.type}". Saltando.`);
-                await this.next();
+                await this._nextInternal();
             }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MODOS DE LECTURA
+    // ─────────────────────────────────────────────────────────────────────────
+
+    toggleAuto() {
+        this.autoMode = !this.autoMode;
+        this.skipMode = false; // mutuamente excluyentes
+        if (!this.autoMode) clearTimeout(this._autoTimer);
+        console.log(`[Engine] Auto: ${this.autoMode ? 'ON' : 'OFF'}`);
+        return this.autoMode;
+    }
+
+    /**
+     * Inicia el skip: avanza instantáneamente hasta el primer texto no visto.
+     * Se detiene solo cuando currentIndex > highWaterMark o llega al fin.
+     * Si skip ya está activo, lo cancela (permite abortar con un segundo toque).
+     *
+     * @param {Function} [onStop] - Callback cuando el skip para (botón → off)
+     */
+    triggerSkip(onStop) {
+        if (this.skipMode) {
+            // Segundo toque — cancelar skip en curso
+            this.skipMode = false;
+            clearTimeout(this._autoTimer);
+            this.renderer._instantText = false;
+            onStop?.();
+            return false;
+        }
+
+        if (this.highWaterMark === 0) {
+            // Sin historial — no hay nada que skipear
+            onStop?.();
+            return false;
+        }
+
+        this.skipMode  = true;
+        this.autoMode  = false;
+        this._skipOnStop = onStop; // guardado para cuando el skip para solo
+
+        if (!this.isBlocked) this.next();
+        return true;
+    }
+
+    /** Llamado internamente cuando el skip llega al final de lo ya visto */
+    _stopSkip() {
+        if (!this.skipMode) return;
+        this.skipMode = false;
+        this.renderer._instantText = false;
+        clearTimeout(this._autoTimer);
+        this._skipOnStop?.();
+        this._skipOnStop = null;
+    }
+
+    stopModes() {
+        this.autoMode = false;
+        this.skipMode = false;
+        clearTimeout(this._autoTimer);
+        // Forzar flush del autosave pendiente al detener modos
+        clearTimeout(this._autosaveTimer);
+        if (this.saveManager && this.state) {
+            this.saveManager.save(this.state, 'autosave')
+                .catch(err => console.error('[Engine] Autosave flush falló:', err));
         }
     }
 
@@ -442,13 +597,47 @@ export class Dramaturge {
         this.state.currentIndex = this.currentIndex;
         this.state.playTime    += Math.floor((Date.now() - this._sessionStart) / 1000);
         this._sessionStart      = Date.now();
+        this.state.highWaterMark = this.highWaterMark;
     }
 
     _syncStateAndSave() {
+        // Avanzar el marcador de progreso
+        if (this.currentIndex - 1 > this.highWaterMark)
+            this.highWaterMark = this.currentIndex - 1;
         this._syncState();
+
+        // Autosave con debounce — cancela la escritura anterior si llega otra
+        // antes de 2.5s. Evita microfreezes en hardware lento por writes continuos.
         if (this.saveManager) {
-            this.saveManager.save(this.state, 'autosave')
-                .catch(err => console.error('[Engine] Autosave falló:', err));
+            clearTimeout(this._autosaveTimer);
+            this._autosaveTimer = setTimeout(() => {
+                this.saveManager.save(this.state, 'autosave')
+                    .catch(err => console.error('[Engine] Autosave falló:', err));
+            }, 2500);
+        }
+
+        // Auto-avance si está activo
+        if (this.autoMode) {
+            clearTimeout(this._autoTimer);
+            this._autoTimer = setTimeout(() => {
+                if (this.autoMode && !this.isBlocked) this.next();
+            }, this.autoDelay);
+
+        // Skip mode: continuar si aún hay contenido ya visto por delante
+        } else if (this.skipMode) {
+            if (this.currentIndex <= this.highWaterMark) {
+                clearTimeout(this._autoTimer);
+                this._autoTimer = setTimeout(() => {
+                    if (!this.skipMode || this._nextRunning) return;
+                    // Llamar _nextInternal directamente — sabemos que isBlocked = false
+                    // y evitamos que los guards de next() descarten el avance.
+                    this._nextRunning = true;
+                    this._nextInternal().finally(() => { this._nextRunning = false; });
+                }, 30);
+            } else {
+                // Llegamos al límite del contenido visto — parar automáticamente
+                this._stopSkip();
+            }
         }
     }
 

@@ -78,13 +78,17 @@ export class Renderer {
         this.bgCurrent     = null;
 
         // Estado del typewriter
-        this._twTimer    = null;
+        this._twRafId    = null;   // handle de rAF activo
         this._twFullText = '';
         this._twOnDone   = null;
         this._twDone     = false;
 
         // Bloqueo durante transición de modo — el Engine lo respeta en next()
         this.isTransitioning = false;
+
+        // Cuando true, el typewriter completa el texto instantáneamente (modo skip).
+        // El Engine lo activa antes de llamar typewriter(); se limpia solo después.
+        this._instantText = false;
 
         // Lock post-skip: evita que un doble clic rápido salte el texto recién completado
         this._skipLocked = false;
@@ -257,26 +261,55 @@ export class Renderer {
         // Nombre se fija después del crossfade, justo antes de empezar a escribir
         this.nameEl.innerText = isNarration ? '' : name;
 
-        let i = 0;
-        clearInterval(this._twTimer);
+        // Modo skip: completar texto sin animación (un solo frame)
+        if (this._instantText) {
+            this._instantText    = false; // consumir el flag
+            this.textEl.innerText = text;
+            this._twDone          = true;
+            this._setAdvance(false); // en skip no mostramos el ▼
+            this._twOnDone?.();
+            return;
+        }
 
-        this._twTimer = setInterval(() => {
-            this.textEl.append(text.charAt(i++));
-            if (i >= text.length) {
-                clearInterval(this._twTimer);
-                this._twDone = true;
-                // Mostrar indicador de avance cuando termina
+        // rAF typewriter — velocidad consistente independiente del hardware
+        // y del estado del tab (no se dispara en background como setInterval).
+        // Acumula tiempo real y emite un carácter por cada TW_SPEED ms transcurridos.
+        let i          = 0;
+        let lastTime   = null;
+        let accumulated = 0;
+
+        this._twRafId = null;
+        cancelAnimationFrame(this._twRafId);
+
+        const tick = (now) => {
+            if (lastTime === null) lastTime = now;
+            accumulated += now - lastTime;
+            lastTime = now;
+
+            // Emitir todos los caracteres que correspondan al tiempo acumulado
+            while (accumulated >= TW_SPEED && i < text.length) {
+                this.textEl.append(text.charAt(i++));
+                accumulated -= TW_SPEED;
+            }
+
+            if (i < text.length) {
+                this._twRafId = requestAnimationFrame(tick);
+            } else {
+                this._twRafId = null;
+                this._twDone  = true;
                 this._setAdvance(true);
                 this._twOnDone?.();
             }
-        }, TW_SPEED);
+        };
+
+        this._twRafId = requestAnimationFrame(tick);
     }
 
     skipTypewriter() {
         if (this._twDone) return;
 
-        clearInterval(this._twTimer);
-        this._twTimer         = null;
+        cancelAnimationFrame(this._twRafId);
+        this._twRafId         = null;
         this.textEl.innerText = this._twFullText;
         this._twDone          = true;
 
@@ -287,6 +320,68 @@ export class Renderer {
         setTimeout(() => { this._skipLocked = false; }, 180);
 
         this._twOnDone?.();
+    }
+
+    /**
+     * Feedback visual al intentar avanzar cuando el texto no terminó.
+     * Pulso sutil en el borde de la caja — indica "espera, estoy escribiendo".
+     */
+    /**
+     * Cambia el cursor del click-zone según si se puede avanzar.
+     * 'ready'  → pointer (puede hacer clic)
+     * 'wait'   → default (transición en curso, no hacer clic)
+     * 'typing' → pointer con indicación de skip disponible
+     */
+    /**
+     * Limpia la escena visual completamente.
+     * Llamado por Engine.reset() al iniciar una nueva partida.
+     * No destruye la app PixiJS — solo vacía sprites y fondo.
+     */
+    clearScene() {
+        // Destruir todos los sprites activos
+        for (const sprite of this.activeSprites.values()) {
+            sprite.destroy({ texture: false });
+        }
+        this.activeSprites.clear();
+
+        // Destruir el fondo
+        if (this.bgCurrent) {
+            this.bgCurrent.destroy({ texture: false });
+            this.bgCurrent = null;
+        }
+
+        // Limpiar textbox
+        if (this.nameEl) this.nameEl.innerText = '';
+        if (this.textEl) this.textEl.innerText = '';
+        this._setAdvance(false);
+
+        // Cancelar typewriter en curso
+        cancelAnimationFrame(this._twRafId);
+        this._twRafId    = null;
+        this._twDone     = false;
+        this._twFullText = '';
+        this._twOnDone   = null;
+    }
+
+    setCursorState(state) {
+        const zone = document.getElementById('click-zone');
+        if (!zone) return;
+        if (state === 'wait') {
+            zone.style.cursor = 'default';
+            zone.style.pointerEvents = 'none';
+        } else {
+            zone.style.cursor = 'pointer';
+            zone.style.pointerEvents = '';
+        }
+    }
+
+    flashTextBox() {
+        if (!this.textBox) return;
+        this.textBox.classList.remove('click-flash');
+        // Forzar reflow para reiniciar la animación si se llama repetido
+        void this.textBox.offsetWidth;
+        this.textBox.classList.add('click-flash');
+        setTimeout(() => this.textBox.classList.remove('click-flash'), 150);
     }
 
     /** Muestra u oculta el indicador de avance (▼) */
@@ -409,6 +504,9 @@ export class Renderer {
         });
 
         // ── Pantalla en negro: preparar todo de golpe ─────────────────────
+        // Cancelar typewriter en curso si lo hay
+        cancelAnimationFrame(this._twRafId);
+        this._twRafId = null;
         if (this.textEl)  this.textEl.innerText = '';
         if (this.nameEl)  this.nameEl.innerText = '';
         this._setAdvance(false);

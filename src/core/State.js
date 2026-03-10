@@ -43,6 +43,11 @@ export class GameState {
         //   mode:    'dialogue' | 'narrate' | null  — modo de textbox activo
         this.visualState = data.visualState ?? { bg: null, sprites: {}, mode: null };
 
+        // ── Progreso de lectura — para el modo skip ─────────────────────
+        // Índice más alto completado por el jugador.
+        // Skip solo avanza automáticamente hasta este punto — nunca más allá.
+        this.highWaterMark = data.highWaterMark ?? 0;
+
         // ── Metadata del save ─────────────────────────────────────────────────
         this.savedAt  = data.savedAt  ?? null; // timestamp del último guardado
         this.playTime = data.playTime ?? 0;    // segundos acumulados de juego
@@ -88,6 +93,7 @@ export class GameState {
             flags:         { ...this.flags },
             inventory:     [...this.inventory],
             audioSettings: { ...this.audioSettings },
+            highWaterMark: this.highWaterMark,
             visualState:   {
                 bg:      this.visualState.bg,
                 sprites: { ...this.visualState.sprites },
@@ -96,6 +102,24 @@ export class GameState {
             savedAt:  this.savedAt,
             playTime: this.playTime,
         };
+    }
+
+    /**
+     * Resetea el estado a una partida nueva, conservando las preferencias de audio.
+     * Llamado por Engine.reset() al iniciar Nueva Partida.
+     */
+    reset() {
+        const audio = { ...this.audioSettings }; // conservar preferencias
+        // Re-inicializar todos los campos narrativos
+        this.currentFile   = 'inicio.dan';
+        this.currentIndex  = 0;
+        this.flags         = {};
+        this.inventory     = [];
+        this.visualState   = { bg: null, sprites: {}, mode: null };
+        this.highWaterMark = 0;
+        this.savedAt       = null;
+        this.playTime      = 0;
+        this.audioSettings = audio; // restaurar preferencias
     }
 
     /** Crea una instancia de GameState desde un objeto plano (Dexie o JSON importado). */

@@ -37,23 +37,53 @@ const menu = new MenuSystem({
     gameSubtitle: 'Cada secreto tiene su precio',
 });
 
+// ── InputGate — punto de entrada único para todo input del jugador ──────────
+//
+// Garantías:
+//   1. Solo pasa si el estado del menú es IN_GAME
+//   2. No pasa si hay paneles del menú abiertos (slots, audio, modal)
+//   3. Cooldown de 60ms — descarta dobles clicks/teclas del mismo gesto
+//   4. No pasa si click fue sobre un elemento de UI (botón, hud, menú)
+//
+// Engine.next() tiene su propio guard interno (_nextRunning) para re-entrancia
+// en llamadas async, pero este gate es la primera línea de defensa.
+
+const S = MenuSystem.STATES ?? {};
+
+let _lastInputTs = 0;
+
+function inputGate(fromUI = false) {
+    // Solo en IN_GAME
+    if (menu.state !== 'IN_GAME') return;
+
+    // No si hay panel abierto — incluido el backlog
+    if (menu.backlogOpen) return;
+    const panelOpen = document.querySelector(
+        '#dm-slot-panel:not(.dm-hidden), #dm-audio-panel:not(.dm-hidden), #dm-modal:not(.dm-hidden)'
+    );
+    if (panelOpen) return;
+
+    // Cooldown de 60ms (cubre doble-tap y bounce de teclado)
+    const now = Date.now();
+    if (now - _lastInputTs < 60) return;
+    _lastInputTs = now;
+
+    engine.next();
+}
+
 document.getElementById('click-zone')
     ?.addEventListener('click', (e) => {
-        if (e.target.closest('button, #hud, #pause-menu, #main-menu')) return;
-        engine.next();
+        // Ignorar si el clic fue sobre un botón o elemento de UI
+        if (e.target.closest('button, a, input, #hud, #pause-menu, #main-menu, [id^="dm-"]')) return;
+        inputGate();
     });
 
-// ── Avance por teclado (Space) ────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
-    if (e.code !== 'Space') return;
+    if (e.code !== 'Space' && e.code !== 'Enter') return;
     const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
-    const mainMenu  = document.getElementById('main-menu');
-    const pauseMenu = document.getElementById('pause-menu');
-    if (!mainMenu?.classList.contains('hidden'))  return;
-    if (pauseMenu?.classList.contains('visible')) return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'A') return;
     e.preventDefault();
-    engine.next();
+    inputGate();
 });
 
 async function init() {

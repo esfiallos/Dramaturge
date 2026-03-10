@@ -214,3 +214,92 @@ if (saved) {
 }
 
 render();
+// ─── Export VO — genera CSV de guión para doblaje ─────────────────────────
+//
+// Formato de salida:
+//   ID,          PERSONAJE,   TEXTO,               ARCHIVO_SUGERIDO
+//   val_001,     Valeria,     "Otra vez...",        valeria_001.mp3
+//   NAR_001,     (Narrador),  "El bosque...",       narrator_001.mp3
+//
+// Cómo funciona el ID:
+//   - Diálogo: prefijo del actor (3 chars) + _ + contador por actor (zero-padded)
+//     ej: valeria → val_001, miki → mik_001
+//   - Narración: NAR_ + contador global de narraciones
+//   - Si la línea ya tiene un tag [vo_id], se usa ese ID directamente
+//
+// El escritor puede luego pegar el ID como tag en el .dan:
+//   dialogue valeria:triste "Otra vez..." [val_001]
+
+document.getElementById('btn-export-vo').addEventListener('click', () => {
+    const text     = editorEl.value;
+    const filename = filenameEl.value || 'script';
+
+    const lines = text.split('\n');
+
+    // Contadores por actor para generar IDs únicos
+    const counters  = {};  // actorKey → número
+    let   narCount  = 0;
+
+    const rows = [['ID', 'PERSONAJE', 'TEXTO', 'ARCHIVO_SUGERIDO', 'NOTAS']];
+
+    // Regex inline (no depende del parser para ser portátil en el editor)
+    const reDial = /^(?<actor>\w+):(?<pose>\w+)\s+"(?<text>[^"]+)"(?:\s+\[(?<vo>\w+)\])?/;
+    const reNarr = /^narrate\s+"(?<text>[^"]+)"/;
+
+    for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+
+        // ── Diálogo ────────────────────────────────────────────────────
+        const dMatch = line.match(reDial);
+        if (dMatch) {
+            const { actor, pose, text, vo } = dMatch.groups;
+
+            // ID: tag existente O generar uno nuevo
+            let id;
+            if (vo) {
+                id = vo;
+            } else {
+                const key  = actor.slice(0, 3).toLowerCase();
+                counters[key] = (counters[key] ?? 0) + 1;
+                id = `${key}_${String(counters[key]).padStart(3, '0')}`;
+            }
+
+            const actorName  = actor.charAt(0).toUpperCase() + actor.slice(1);
+            const fileSugg   = `${id}.mp3`;
+            const notas      = pose !== 'neutral' ? `pose: ${pose}` : '';
+
+            rows.push([id, actorName, text, fileSugg, notas]);
+            continue;
+        }
+
+        // ── Narración ──────────────────────────────────────────────────
+        const nMatch = line.match(reNarr);
+        if (nMatch) {
+            narCount++;
+            const id       = `nar_${String(narCount).padStart(3, '0')}`;
+            const text     = nMatch.groups.text;
+            rows.push([id, '(Narrador)', text, `${id}.mp3`, '']);
+        }
+    }
+
+    if (rows.length <= 1) {
+        alert('No se encontraron líneas de diálogo o narración en el script.');
+        return;
+    }
+
+    // Serializar CSV (escape de comillas internas)
+    const csv = rows
+        .map(cols => cols.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+        .join('\n');
+
+    // Añadir BOM UTF-8 para que Excel lo abra directamente con tildes
+    const bom  = '\uFEFF';
+    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${filename}_vo_script.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+});

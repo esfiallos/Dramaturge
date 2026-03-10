@@ -1,17 +1,85 @@
-# cap01/scene_01 — prueba de fuego
-pawn valeria
+# ══════════════════════════════════════════════════════
+# cap01/scene_01.dan
+# Prueba totalizadora — Capítulo 1
+# Cubre: narrate, bg.set, pawn, show/hide, dialogue,
+#        poses, audio, wait, set flag, if/else/endif,
+#        puzzle, set inventory, goto
+# ══════════════════════════════════════════════════════
 
-bg.set forest fade:1s
-audio.bgm play[track_01] vol:0.4
+# ── Carga de personajes ───────────────────────────────
+pawn valeria, miki
 
+# ── Apertura en narración ─────────────────────────────
+bg.set forest fade 1.5s
+audio.bgm play[track_01]
+
+narrate "El bosque de Aldenmoor guarda secretos que la mayoría prefiere no recordar."
+
+narrate "Valeria los recuerda todos."
+
+# ── Entrada del personaje ─────────────────────────────
 show valeria:neutral at left fade
 
-valeria:neutral "Este es el primer diálogo real del engine."
-valeria:neutral "bueno.........."
+ valeria:neutral "Otra vez este lugar. Cada año igual."
 
-show valeria:neutral at right fade
-valeria:triste "Si ves esto, todo funciona."
+# ── Cambio de pose ────────────────────────────────────
+ valeria:triste "Aunque este año... algo se siente distinto."
 
-valeria:triste "Probando" [001]
+wait 0.8s
 
-valeria:neutral "x + y = pes."
+# ── Segundo personaje entra desde la derecha ──────────
+show miki:neutral at right slide
+
+miki:feliz "¡Valeria! Sabía que vendrías. Siempre vienes."
+
+valeria:sorpresa "Miki. No esperaba verte aquí."
+
+miki:feliz "Nadie me espera nunca. Es mi superpoder."
+
+# ── Narración intercalada con diálogo ─────────────────
+narrate "Una pausa incómoda se instaló entre ellas, tan familiar como el olor a pino mojado."
+
+valeria:neutral "¿Encontraste algo esta vez?"
+
+# ── Puzzle de opción múltiple ─────────────────────────
+ miki:feliz "Depende. ¿Qué tan lista estás para la verdad?"
+
+puzzle P01 pass:"Algo dentro de Valeria supo que la respuesta era correcta." fail:"Valeria frunció el ceño. No era eso."
+
+# ── Condicional sobre resultado del puzzle ────────────
+set flag.miki_confio = false
+
+if flag.P01_result == true
+    set flag.miki_confio = true
+     miki:feliz "Exacto. Sabía que lo entenderías."
+else
+     miki:neutral "Hmm. Quizás aún no es el momento."
+endif
+
+# ── Reacción según el flag ────────────────────────────
+if flag.miki_confio == true
+    narrate "Por primera vez en años, Valeria sintió que no estaba sola en esto."
+    show valeria:neutral at center fade
+    hide miki fade
+     valeria:neutral "Entonces cuéntame todo."
+else
+    narrate "El silencio se extendió. Algunas verdades necesitan más tiempo."
+     valeria:triste "Está bien. A tu ritmo."
+endif
+
+# ── Objeto clave encontrado ───────────────────────────
+audio.se play[rain_ambience] 0.7
+
+narrate "Al pie del árbol más viejo, algo brillaba entre las raíces."
+
+set inventory.add llave_maestra
+ valeria:sorpresa "Una llave. ¿Qué abre esto?"
+
+# ── Guardar progreso narrativo ────────────────────────
+set flag.cap01_completo = true
+
+narrate "El bosque respondió con viento. La respuesta estaba más adentro."
+
+# ── Transición al siguiente capítulo ─────────────────
+wait 1.2s
+goto cap02/scene_01 fade:black

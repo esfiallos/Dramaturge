@@ -50,13 +50,13 @@ export const KDN_GRAMMAR = {
     // ── Escena ────────────────────────────────────────────────────────────────
 
     // bg.set fondo [efecto:tiempo]
-    BG_COMMAND: /^bg\.set\s+(?<target>\w+)(?:\s+(?<effect>\w+)(?::(?<time>[\d.]+s?))?)?/,
+    BG_COMMAND: /^bg\.set\s+(?<target>\w+)(?:\s+(?<effect>\w+)(?:[:\s](?<time>[\d.]+s?))?)?/,
 
     // ── Audio ─────────────────────────────────────────────────────────────────
 
     // audio.bgm play[track] vol:0.5
     // audio.se  play[explosion] vol:0.8
-    AUDIO_COMMAND: /^audio\.(?<audioType>bgm|se)\s+(?<action>\w+)\[(?<param>[^\]]+)\](?:\s+vol:(?<vol>[\d.]+))?/,
+    AUDIO_COMMAND: /^audio\.(?<audioType>bgm|se)\s+(?<action>\w+)\[(?<param>[^\]]+)\](?:\s+(?:vol:)?(?<vol>[\d.]+))?/,
 
     // ── Control de flujo ──────────────────────────────────────────────────────
 

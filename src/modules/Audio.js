@@ -32,7 +32,7 @@ const AUDIO_BASE = {
  *   1. Si el param ya es una ruta absoluta ('/assets/...'), se usa directo.
  *   2. Si no, se añade el prefijo del canal (bgm/voice/se).
  *   3. Si no tiene extensión, se prueba mp3 → ogg via HEAD request.
- * @param {string} param   - Valor del param del script ('.dan')
+ * @param {string} param   - Valor del param del script ('.ems')
  * @param {string} channel - 'bgm' | 'voice' | 'se'
  */
 async function resolveAudioPath(param, channel = 'bgm') {
@@ -70,6 +70,18 @@ export class AudioManager {
         };
 
         this._bgmFadeTimer = null; // referencia al intervalo de fade activo
+
+        // Ducking: cuando hay voz activa, el BGM baja al % definido
+        this._bgmBaseVolume  = this._volumes.bgm; // volumen real sin duck
+        this._duckFactor     = 0.35; // BGM baja al 35% mientras habla un personaje
+        this._duckRafId      = null;
+
+        // Restaurar BGM cuando la voz termina
+        this._voice.addEventListener('ended', () => this._unduckBGM());
+        this._voice.addEventListener('pause', () => {
+            // Solo restaurar si fue pausa definitiva (src vacío = stop manual)
+            if (!this._voice.src) this._unduckBGM();
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -88,7 +100,8 @@ export class AudioManager {
 
         this._cancelFade();
         this._bgm.src    = resolved;
-        this._bgm.volume = volume ?? this._volumes.bgm;
+        this._bgmBaseVolume = volume ?? this._volumes.bgm;
+        this._bgm.volume    = this._bgmBaseVolume;
         this._bgm.currentTime = 0;
         this._bgm.play().catch(e => console.warn(`[Audio] BGM: ${e.message} (${resolved})`));
     }
@@ -116,7 +129,9 @@ export class AudioManager {
         this._voice.src    = resolved;
         this._voice.volume = this._volumes.voice;
         this._voice.currentTime = 0;
-        this._voice.play().catch(e => console.warn(`[Audio] Voz: ${e.message} (${resolved})`));
+        this._voice.play()
+            .then(() => this._duckBGM()) // ducking solo si la voz arrancó bien
+            .catch(e => console.warn(`[Audio] Voz: ${e.message} (${resolved})`));
     }
 
     /**
@@ -144,7 +159,10 @@ export class AudioManager {
         this._volumes[channel] = clamped;
 
         // Aplicar inmediatamente al elemento activo
-        if (channel === 'bgm')   this._bgm.volume   = clamped;
+        if (channel === 'bgm') {
+            this._bgmBaseVolume = clamped; // actualizar base para ducking
+            this._bgm.volume    = clamped;
+        }
         if (channel === 'voice') this._voice.volume = clamped;
         if (channel === 'se')    this._se.volume    = clamped;
     }
@@ -193,22 +211,98 @@ export class AudioManager {
         const startVolume = audioEl.volume;
         const startTime   = performance.now();
 
-        this._bgmFadeTimer = setInterval(() => {
-            const elapsed = performance.now() - startTime;
-            const t       = Math.min(elapsed / durationMs, 1);
-            audioEl.volume = startVolume * (1 - t);
-
-            if (t >= 1) {
-                this._cancelFade();
+        const tick = () => {
+            const t = Math.min((performance.now() - startTime) / durationMs, 1);
+            // Ease-out para que el fade suene natural
+            audioEl.volume = startVolume * (1 - (t * t));
+            if (t < 1) {
+                this._bgmFadeTimer = requestAnimationFrame(tick);
+            } else {
+                audioEl.volume = 0;
+                this._bgmFadeTimer = null;
                 onComplete?.();
             }
-        }, 16); // ~60fps
+        };
+        this._bgmFadeTimer = requestAnimationFrame(tick);
     }
 
     _cancelFade() {
         if (this._bgmFadeTimer) {
-            clearInterval(this._bgmFadeTimer);
+            cancelAnimationFrame(this._bgmFadeTimer);
             this._bgmFadeTimer = null;
         }
+    }
+
+    // ── Ducking helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Duck suave al entrar en pausa — baja el BGM al 20% con ease-in.
+     * Más pronunciado que el duck de voz porque es una pausa activa del usuario.
+     */
+    pauseDuck() {
+        if (this._bgm.paused) return;
+        cancelAnimationFrame(this._duckRafId);
+        const startVol  = this._bgm.volume;
+        const targetVol = this._bgmBaseVolume * 0.20;
+        const durationMs = 300;
+        const startTime  = performance.now();
+        const tick = () => {
+            const t = Math.min((performance.now() - startTime) / durationMs, 1);
+            const ease = t * t; // ease-in — baja rápido al principio
+            this._bgm.volume = startVol + (targetVol - startVol) * ease;
+            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
+        };
+        this._duckRafId = requestAnimationFrame(tick);
+    }
+
+    /** Restaura el BGM al salir de pausa — ease-out cúbico. */
+    pauseUnduck() {
+        if (this._bgm.paused) return;
+        cancelAnimationFrame(this._duckRafId);
+        const startVol   = this._bgm.volume;
+        const targetVol  = this._bgmBaseVolume;
+        const durationMs = 500;
+        const startTime  = performance.now();
+        const tick = () => {
+            const t = Math.min((performance.now() - startTime) / durationMs, 1);
+            const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
+            this._bgm.volume = startVol + (targetVol - startVol) * ease;
+            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
+        };
+        this._duckRafId = requestAnimationFrame(tick);
+    }
+
+    _duckBGM() {
+        if (this._bgm.paused) return;
+        cancelAnimationFrame(this._duckRafId);
+        const startVol  = this._bgm.volume;
+        const targetVol = this._bgmBaseVolume * this._duckFactor;
+        const durationMs = 220;
+        const startTime  = performance.now();
+
+        const tick = () => {
+            const t = Math.min((performance.now() - startTime) / durationMs, 1);
+            const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+            this._bgm.volume = startVol + (targetVol - startVol) * ease;
+            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
+        };
+        this._duckRafId = requestAnimationFrame(tick);
+    }
+
+    _unduckBGM() {
+        if (this._bgm.paused) return;
+        cancelAnimationFrame(this._duckRafId);
+        const startVol   = this._bgm.volume;
+        const targetVol  = this._bgmBaseVolume;
+        const durationMs = 400;
+        const startTime  = performance.now();
+
+        const tick = () => {
+            const t = Math.min((performance.now() - startTime) / durationMs, 1);
+            const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
+            this._bgm.volume = startVol + (targetVol - startVol) * ease;
+            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
+        };
+        this._duckRafId = requestAnimationFrame(tick);
     }
 }

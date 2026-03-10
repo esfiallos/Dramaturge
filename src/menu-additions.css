@@ -245,6 +245,21 @@
     background: rgba(180, 40, 40, 0.15);
     color: rgba(230, 100, 100, 1);
 }
+/* Estado activo — botón con modo encendido (Auto / Skip corriendo) */
+.hud-btn--active {
+    background: rgba(201, 168, 76, 0.18);
+    color: #e8d48a;
+    border-left-color: rgba(201, 168, 76, 0.35);
+    animation: hud-active-pulse 2s ease-in-out infinite;
+}
+.hud-btn--active:hover {
+    background: rgba(201, 168, 76, 0.26);
+    animation: none;
+}
+@keyframes hud-active-pulse {
+    0%, 100% { color: #e8d48a; background: rgba(201, 168, 76, 0.18); }
+    50%       { color: #f0e0a0; background: rgba(201, 168, 76, 0.28); }
+}
 
 /* ── HUD info — lado izquierdo ──────────────────────────────────────────── */
 #hud-info {
@@ -322,4 +337,154 @@
    La transición CSS no debe animar el cambio de tamaño — ya está cubierto. */
 #text-box {
     transition: none !important;
+}
+
+/* ── Feedback de click en textbox ──────────────────────────────────────────
+   Pulso de borde dorado cuando el usuario hace clic mientras el texto
+   está escribiéndose — indica "espera, ya casi termina". */
+#text-box.click-flash {
+    animation: tb-flash 0.15s ease-out forwards;
+}
+@keyframes tb-flash {
+    0%   { border-top-color: var(--gold-line, rgba(201,168,76,0.28)); }
+    40%  { border-top-color: rgba(201, 168, 76, 0.75); }
+    100% { border-top-color: var(--gold-line, rgba(201,168,76,0.28)); }
+}
+
+/* Click-zone: cursor pointer por defecto en juego, default durante transiciones */
+#click-zone {
+    cursor: pointer;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BACKLOG — historial de texto al estilo Umineko
+   Overlay oscuro semitransparente sobre el juego, texto pasado en tono
+   apagado. La última entrada es la más reciente (al fondo del scroll).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+#dm-backlog {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(3, 3, 5, 0.88);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: backlog-in 0.18s ease-out;
+}
+#dm-backlog.dm-hidden {
+    display: none;
+}
+@keyframes backlog-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+.dm-backlog__inner {
+    width: min(780px, 92vw);
+    height: min(72vh, 680px);
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(201, 168, 76, 0.18);
+    background: rgba(6, 6, 10, 0.97);
+}
+
+/* Cabecera */
+.dm-backlog__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid rgba(201, 168, 76, 0.12);
+    flex-shrink: 0;
+}
+.dm-backlog__title {
+    font-family: 'Cinzel', Georgia, serif;
+    font-size: 0.65rem;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: rgba(201, 168, 76, 0.5);
+}
+.dm-backlog__close {
+    background: transparent;
+    border: none;
+    color: rgba(201, 168, 76, 0.35);
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0.2rem 0.4rem;
+    transition: color 0.15s;
+    line-height: 1;
+}
+.dm-backlog__close:hover {
+    color: rgba(201, 168, 76, 0.8);
+}
+
+/* Lista de entradas */
+.dm-backlog__list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem 2rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+
+    /* Scrollbar discreta */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(201, 168, 76, 0.15) transparent;
+}
+.dm-backlog__list::-webkit-scrollbar { width: 4px; }
+.dm-backlog__list::-webkit-scrollbar-thumb {
+    background: rgba(201, 168, 76, 0.15);
+    border-radius: 2px;
+}
+
+/* Entrada individual */
+.dm-backlog__entry {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+/* Nombre del personaje */
+.dm-backlog__speaker {
+    font-family: 'Cinzel', Georgia, serif;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    /* Color apagado — el texto pasado no compite con el presente */
+    color: rgba(201, 168, 76, 0.38);
+}
+
+/* Texto de diálogo */
+.dm-backlog__text {
+    font-family: 'Crimson Pro', Georgia, serif;
+    font-size: 1.15rem;
+    line-height: 1.6;
+    font-weight: 300;
+    color: rgba(237, 232, 218, 0.32);
+}
+
+/* Narración — itálica, sin speaker, ligeramente más centrada */
+.dm-backlog__entry--narrate {
+    align-items: center;
+    padding: 0 10%;
+    text-align: center;
+}
+.dm-backlog__text--narrate {
+    font-style: italic;
+    font-size: 1.1rem;
+    color: rgba(237, 232, 218, 0.22); /* aún más apagado que el diálogo */
+}
+
+/* La última entrada visible — muy ligeramente más brillante */
+/* como un eco de lo que acaba de ocurrir */
+.dm-backlog__entry:last-child .dm-backlog__text {
+    color: rgba(237, 232, 218, 0.48);
+}
+.dm-backlog__entry:last-child .dm-backlog__speaker {
+    color: rgba(201, 168, 76, 0.55);
+}
+.dm-backlog__entry:last-child .dm-backlog__text--narrate {
+    color: rgba(237, 232, 218, 0.38);
 }

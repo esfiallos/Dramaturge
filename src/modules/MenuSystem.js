@@ -33,6 +33,12 @@ export class MenuSystem {
         PAUSED:    'PAUSED',
     };
 
+    /** Estado actual — leído por InputGate en main.js */
+    get state() { return this._state; }
+
+    /** True si el backlog está abierto — leído por InputGate */
+    get backlogOpen() { return this._isBacklogOpen(); }
+
     constructor({ engine, saveManager, sceneManager, audio,
                   startScene   = 'cap01/scene_01',
                   gameTitle    = 'DRAMATURGE',
@@ -98,12 +104,20 @@ export class MenuSystem {
                 this._els.hud?.classList.add('visible');
                 this._updateHUDInfo();
                 this._startHUDClock();
+                // Restaurar audio si veníamos de pausa
+                this.audio.pauseUnduck?.();
                 break;
 
             case S.PAUSED:
                 this._els.hud?.classList.add('visible');
                 this._els.pauseMenu?.classList.add('visible');
                 this.engine.isBlocked = true;
+                // stopModes dispara _skipOnStop → limpia visual del botón skip
+                this.engine.stopModes?.();
+                this._els.btnAuto?.classList.remove('hud-btn--active');
+                this._els.btnSkip?.classList.remove('hud-btn--active');
+                // Atenuar audio en pausa
+                this.audio.pauseDuck?.();
                 break;
         }
     }
@@ -127,6 +141,9 @@ export class MenuSystem {
             btnSave:  $('btn-save'),
             btnPause: $('btn-pause'),
             btnExit:      $('btn-exit'),
+            btnBacklog:   $('btn-backlog'),
+            btnAuto:      $('btn-auto'),
+            btnSkip:      $('btn-skip'),
             hudTitle:     $('hud-title'),
             hudScene:     $('hud-scene'),
             hudPlaytime:  $('hud-playtime'),
@@ -141,6 +158,30 @@ export class MenuSystem {
         };
     }
 
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // AUTO / SKIP
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _toggleAuto() {
+        const active = this.engine.toggleAuto();
+        this._els.btnAuto?.classList.toggle('hud-btn--active', active);
+        this._els.btnSkip?.classList.remove('hud-btn--active');
+    }
+
+    _triggerSkip() {
+        const btn = this._els.btnSkip;
+        const active = this.engine.triggerSkip(() => {
+            // Callback: skip paró solo (llegó a contenido nuevo o fue cancelado)
+            btn?.classList.remove('hud-btn--active');
+        });
+        // true = skip arrancó, false = no hay nada que skipear o se canceló
+        btn?.classList.toggle('hud-btn--active', active);
+        if (active) {
+            // Quitar auto si estaba activo
+            this._els.btnAuto?.classList.remove('hud-btn--active');
+        }
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // HUD INFO
@@ -186,6 +227,7 @@ export class MenuSystem {
     _buildPanels() {
         this._buildSlotPanel();
         this._buildAudioPanel();
+        this._buildBacklogPanel();
         this._buildModal();
         this._buildLoadingOverlay();
         this._buildToast();
@@ -322,7 +364,10 @@ export class MenuSystem {
         on(this._els.btnLoad,     'click', () => this._actionOpenSlots('load'));
 
         // ── HUD ───────────────────────────────────────────────────────────────
-        on(this._els.btnSave,  'click', () => this._actionQuickSave());
+        on(this._els.btnBacklog, 'click', () => this._openBacklog());
+        on(this._els.btnAuto, 'click', () => this._toggleAuto());
+        on(this._els.btnSkip, 'click', () => this._triggerSkip());
+        on(this._els.btnSave, 'click', () => this._actionQuickSave());
         on(this._els.btnPause, 'click', () => {
             if (this._state === S.IN_GAME) this._setState(S.PAUSED);
         });
@@ -340,6 +385,10 @@ export class MenuSystem {
         // ── ESC ───────────────────────────────────────────────────────────────
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') this._handleEsc();
+            if (e.key === 'l' || e.key === 'L') {
+                if (this._isBacklogOpen()) this._closeBacklog();
+                else this._openBacklog();
+            }
         });
     }
 
@@ -355,7 +404,12 @@ export class MenuSystem {
         this._showLoading('Iniciando...');
         this.audio.unlock?.();
 
-        // 2. Cargar todos los assets / escena
+        // 2. Resetear el engine completamente — borra flags, inventario, sprites,
+        //    backlog y todo el estado narrativo de una partida anterior.
+        //    Nueva partida SIEMPRE empieza desde cero.
+        this.engine.reset();
+
+        // 3. Cargar todos los assets / escena
         await this.sceneManager.start(this.startScene);
 
         // 3. Ahora que el canvas tiene contenido, hacer transición de entrada
@@ -378,12 +432,9 @@ async _actionOpenSlots(mode) {
     }
 
     _actionQuickSave() {
-        const S = MenuSystem.STATES;
-        if (this._state !== S.IN_GAME && this._state !== S.PAUSED) return;
-        this.engine.saveToSlot('slot_1').then(async () => {
-            await this._loadSaves();
-            this._toast('Partida guardada en Ranura 1');
-        }).catch(() => this._toast('Error al guardar'));
+        // Ya no hace quick-save ciego — abre el panel de slots para que
+        // el jugador elija dónde guardar.
+        this._actionOpenSlots('save');
     }
 
     async _actionExitDirect() {
@@ -409,6 +460,67 @@ async _actionOpenSlots(mode) {
         this._savesReady = this._loadSaves();
     }
 
+
+
+    _buildBacklogPanel() {
+        const el = document.createElement('div');
+        el.id = 'dm-backlog';
+        el.className = 'dm-hidden';
+        el.innerHTML = `
+            <div class="dm-backlog__inner">
+                <div class="dm-backlog__header">
+                    <span class="dm-backlog__title">Historial</span>
+                    <button class="dm-backlog__close" id="dm-backlog-close">✕</button>
+                </div>
+                <div class="dm-backlog__list" id="dm-backlog-list"></div>
+            </div>`;
+        document.body.appendChild(el);
+        this._els.backlogPanel = el;
+        this._els.backlogList  = el.querySelector('#dm-backlog-list');
+
+        document.getElementById('dm-backlog-close')
+            ?.addEventListener('click', () => this._closeBacklog());
+
+        // Scroll con rueda también cierra si llega al tope superior
+        el.addEventListener('wheel', (e) => { e.stopPropagation(); }, { passive: true });
+    }
+
+    _openBacklog() {
+        if (this._state !== MenuSystem.STATES.IN_GAME) return;
+        this._renderBacklog();
+        this._els.backlogPanel?.classList.remove('dm-hidden');
+    }
+
+    _closeBacklog() {
+        this._els.backlogPanel?.classList.add('dm-hidden');
+    }
+
+    _isBacklogOpen() {
+        return this._els.backlogPanel && !this._els.backlogPanel.classList.contains('dm-hidden');
+    }
+
+    _renderBacklog() {
+        if (!this._els.backlogList) return;
+        const entries = this.engine.backlog ?? [];
+
+        this._els.backlogList.innerHTML = entries
+            .map(({ speaker, text }) => {
+                if (speaker) {
+                    return `<div class="dm-backlog__entry dm-backlog__entry--dialogue">
+                        <span class="dm-backlog__speaker">${speaker}</span>
+                        <span class="dm-backlog__text">${text}</span>
+                    </div>`;
+                } else {
+                    return `<div class="dm-backlog__entry dm-backlog__entry--narrate">
+                        <span class="dm-backlog__text dm-backlog__text--narrate">${text}</span>
+                    </div>`;
+                }
+            })
+            .join('');
+
+        // Scroll al final — la última entrada es la más reciente
+        this._els.backlogList.scrollTop = this._els.backlogList.scrollHeight;
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // PANEL DE SLOTS
@@ -547,6 +659,7 @@ async _actionOpenSlots(mode) {
     // ─────────────────────────────────────────────────────────────────────────
 
     _handleEsc() {
+        if (this._isBacklogOpen()) { this._closeBacklog(); return; }
         const S = MenuSystem.STATES;
         if (this._state === S.MAIN_MENU || this._state === S.LOADING) return;
 
