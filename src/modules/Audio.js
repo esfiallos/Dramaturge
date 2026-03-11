@@ -15,9 +15,9 @@ const AUDIO_FORMATS = ['mp3', 'ogg'];
 // Si el param que viene del script ya empieza con '/', se usa directamente.
 // Si no (ej: 'track_01'), se le añade el prefijo del canal.
 const AUDIO_BASE = {
-    bgm:   '/assets/audio/bgm/',
-    voice: '/assets/audio/voice/',
-    se:    '/assets/audio/se/',
+    bgm:   `${import.meta.env.BASE_URL}assets/audio/bgm/`,
+    voice: `${import.meta.env.BASE_URL}assets/audio/voice/`,
+    se:    `${import.meta.env.BASE_URL}assets/audio/se/`,
 };
 
 /**

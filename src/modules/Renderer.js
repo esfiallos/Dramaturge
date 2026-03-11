@@ -207,7 +207,7 @@ export class Renderer {
 
     async changeBackground(target, effect = 'fade', time = '1s') {
         const durationMs = this._parseTime(time);
-        const path       = `/assets/bg/${target}`; // sin extensión: loadTexture prueba webp→png→jpg
+        const path       = `${import.meta.env.BASE_URL}assets/bg/${target}`; // sin extensión: loadTexture prueba webp→png→jpg
 
         const texture = await loadTexture(path);
         if (!texture) {

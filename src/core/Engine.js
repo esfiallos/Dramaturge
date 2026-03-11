@@ -1,6 +1,10 @@
 // src/core/Engine.js
 
 import { Character } from './models/Character.js';
+
+// Ruta base del deployment — '/' en dev, '/Dramaturge/' en GitHub Pages
+const BASE_URL = import.meta.env.BASE_URL;
+
 import { GameState } from './State.js';
 
 export class Dramaturge {
@@ -230,7 +234,7 @@ export class Dramaturge {
                     console.error(`[Engine] SPRITE_SHOW: pawn "${inst.actor}" no cargado.`);
                     break;
                 }
-                const path = pawn.getSprite(inst.pose);
+                const path = `${BASE_URL}${pawn.getSprite(inst.pose).replace(/^\//, '')}`;
                 this._clearActorFromSlots(inst.actor);
                 this.slots[inst.slot] = inst.actor;
                 await this.renderer.renderSprite(inst.actor, path, inst.slot, inst.effect);
@@ -284,7 +288,7 @@ export class Dramaturge {
                 this.state.visualState.mode = 'dialogue';
 
                 if (inst.pose && pawn) {
-                    const posePath  = pawn.getSprite(inst.pose);
+                    const posePath  = `${BASE_URL}${pawn.getSprite(inst.pose).replace(/^\//, '')}`;
                     const actorSlot = this._getActorSlot(inst.actor);
                     if (actorSlot) this.renderer.updateSprite(inst.actor, posePath, actorSlot);
                 }
@@ -427,7 +431,7 @@ export class Dramaturge {
                 // Sobrevive a Nueva Partida y a borrar saves.
                 const existing = await this.db.gallery?.get(inst.cgId);
                 if (!existing) {
-                    const path = `/assets/cg/${inst.cgId}`;
+                    const path = `${BASE_URL}assets/cg/${inst.cgId}`;
                     await this.db.gallery?.put({
                         id:          inst.cgId,
                         title:       inst.title ?? inst.cgId,

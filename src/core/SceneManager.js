@@ -14,6 +14,9 @@
 //   target 'cap01/scene_02' → fetch('/scripts/cap01/scene_02.dan')
 //   target 'intro'          → fetch('/scripts/intro.dan')
 //
+// En producción (GitHub Pages) Vite inyecta BASE_URL = '/Dramaturge/' automáticamente.
+// En desarrollo BASE_URL = '/'. No hay que cambiar nada al desplegar.
+//
 // El SceneManager NO conoce al Renderer ni al Audio.
 // Solo coordina Engine + Parser + sistema de archivos.
 
@@ -24,7 +27,7 @@ export class SceneManager {
      * @param {KParser}     parser   - Instancia del parser
      * @param {string}      basePath - Ruta base de los scripts (default: '/scripts/')
      */
-    constructor(engine, parser, basePath = '/scripts/') {
+    constructor(engine, parser, basePath = `${import.meta.env.BASE_URL}scripts/`) {
         this.engine   = engine;
         this.parser   = parser;
         this.basePath = basePath;
@@ -132,7 +135,7 @@ export class SceneManager {
                 // 404 es un error del escritor (ruta incorrecta), no del engine
                 if (response.status === 404) {
                     console.error(`[SceneManager] Script no encontrado: "${url}"`);
-                    console.error(`[SceneManager] Verifica que el archivo exista en /public${url}`);
+                    console.error(`[SceneManager] Verifica que el archivo exista en public/scripts/${target}.dan`);
                 } else {
                     console.error(`[SceneManager] Error ${response.status} al cargar "${url}"`);
                 }
