@@ -1,3 +1,7 @@
+> ⚠️ **Este archivo está deprecado.** Ha sido reemplazado por [`KOEDAN.md`](KOEDAN.md), que refleja el estado actual del lenguaje incluyendo `unlock`, sintaxis dual de `bg.set` y `audio`, y todas las instrucciones añadidas desde v0.5. No mantener este archivo.
+
+---
+
 # Sintaxis del lenguaje **Koedan** (`.dan`)
 
 Referencia completa del lenguaje de scripting de Dramaturge.  

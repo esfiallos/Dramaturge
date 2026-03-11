@@ -42,6 +42,21 @@ public/assets/audio/se/
 
 En el script: `audio.se play[rain_ambience]` o `audio.se play[rain_ambience] 0.5`
 
+
+### CGs (imágenes de escena)
+
+```
+public/assets/cg/
+    cg_01.webp
+    cg_reunion.webp
+```
+
+En el script: `unlock cg_01` o `unlock cg_reunion title:"La reunión"`
+
+El CG se registra en la galería permanente al ejecutarse esa línea por primera vez. Las siguientes veces el motor lo ignora. El jugador puede verlo desde Galería en el menú principal en cualquier momento.
+
+Usar webp siempre. El renderer también prueba png si webp falla.
+
 ### Voces
 
 ```
@@ -117,6 +132,19 @@ Para escribir y probar scripts sin ejecutar el juego completo: `/dev/editor.html
 
 ---
 
+
+## PWA — instalación como app
+
+El juego incluye `manifest.json` con `orientation: landscape` y `display: standalone`. Para que el navegador ofrezca el botón "Instalar aplicación" se necesitan dos pasos pendientes:
+
+1. Crear los iconos en `public/assets/icons/`:
+   - `icon-192.png` — 192×192 px, logo del juego
+   - `icon-512.png` — 512×512 px, misma imagen
+
+2. Añadir un Service Worker. Sin SW la instalación no es posible. Un SW básico de cache-first para los assets es suficiente — hay plantillas en Vite con el plugin `vite-plugin-pwa`.
+
+Sin completar estos pasos el juego funciona normalmente en el navegador — solo no aparece la opción de instalar.
+
 ## Errores comunes
 
 **Sprite no aparece:**  
@@ -127,6 +155,9 @@ El nombre en el script no coincide con el nombre del archivo. El motor no da err
 
 **Personaje no encontrado:**  
 `pawn aldric` fallará si `aldric` no está en la DB. Registrarlo en `/dev/characters.html` antes de escribir la escena.
+
+**CG no aparece en galería:**
+La instrucción `unlock` solo escribe en la DB si el CG no estaba desbloqueado. Si el archivo se añadió después de que el jugador ya pasó por esa línea, el CG está desbloqueado pero la imagen no existía. Solución: borrar la entrada en `/dev/debug.html` o usar el panel de IndexedDB del navegador (DevTools → Application → IndexedDB → DramaturgeDB → gallery).
 
 **bg.set no cambia el fondo:**  
 El archivo no existe en `public/assets/bg/` o el nombre difiere (mayúsculas, extensión). El renderer prueba todos los formatos pero el nombre base debe coincidir exactamente.

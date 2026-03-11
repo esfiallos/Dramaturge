@@ -74,14 +74,19 @@ bg.set void fade 500ms
 
 El nombre es el archivo sin extensión en `/assets/bg/`. El efecto y el tiempo son opcionales. Sin efecto el cambio es instantáneo. El renderer prueba automáticamente webp, png, jpg, jpeg.
 
+El separador entre efecto y tiempo puede ser espacio (`fade 2s`) o dos puntos (`fade:2s`) — ambas formas son equivalentes.
+
 ### Música de fondo
 
 ```
 audio.bgm play[track_01]
 audio.bgm play[track_01] 0.4
+audio.bgm play[track_01] vol:0.4
 ```
 
 El nombre es el archivo sin extensión en `/assets/audio/bgm/`. El volumen (0.0–1.0) es opcional y por defecto 0.5. La música es en loop continuo. Al pausar el juego el BGM se atenúa automáticamente.
+
+El prefijo `vol:` es opcional — `0.4` y `vol:0.4` son equivalentes.
 
 ### Efectos de sonido
 
@@ -149,6 +154,20 @@ set inventory.remove llave_maestra
 El inventario es un array de strings sin duplicados. Persiste en el save.
 
 ---
+
+
+### Desbloquear CG
+
+```
+unlock cg_01
+unlock cg_reunion title:"La reunión"
+```
+
+Desbloquea una imagen en la galería permanente. El CG queda disponible en la pantalla de Galería del menú principal y sobrevive a cualquier acción del jugador — nueva partida, borrar saves, cambiar de navegador no aplica (ver limitaciones de IndexedDB).
+
+El `title` es opcional. Si se omite, la galería muestra el ID como etiqueta. La imagen debe existir en `/assets/cg/` con el nombre del ID.
+
+A diferencia de `set flag.*`, el desbloqueo es irreversible por diseño — no hay instrucción para bloquear de nuevo un CG.
 
 ## Condicionales
 
