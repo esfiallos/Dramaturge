@@ -116,9 +116,20 @@ Bloquea el avance durante el tiempo indicado. En modo skip la pausa se omite aut
 ```
 goto cap01/scene_02
 goto cap02/final_bueno
+goto cap02/scene_01 fade:black
+goto cap02/scene_01 fade:white
 ```
 
 Carga otro archivo `.dan`. La ruta es relativa a `public/scripts/` y no incluye la extensión.
+
+El parámetro `fade` es opcional. Cuando se incluye, el motor ejecuta una transición estructural antes de cargar la escena nueva:
+
+- La pantalla se funde al color indicado (~800ms)
+- Los sprites, fondo y estado visual del capítulo anterior se limpian mientras el color cubre la pantalla
+- La escena nueva carga y su primera instrucción se ejecuta automáticamente al terminar el fade
+- El input queda bloqueado durante toda la transición — el skip no puede saltársela
+
+Usar `fade:black` o `fade:white` para cambios de capítulo o saltos narrativos importantes. Los `goto` sin fade siguen siendo instantáneos y son adecuados para ramificaciones dentro del mismo capítulo.
 
 ### Puzzle
 
