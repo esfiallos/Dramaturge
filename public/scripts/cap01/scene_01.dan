@@ -78,8 +78,7 @@ set inventory.add llave_maestra
 # ── Guardar progreso narrativo ────────────────────────
 set flag.cap01_completo = true
 
-narrate "El bosque respondió con viento. La respuesta estaba más adentro."
-
+valeria:sorpresa "Al capitulo 2"
 # ── Transición al siguiente capítulo ─────────────────
-wait 1.2s
+
 goto cap02/scene_01 fade:black

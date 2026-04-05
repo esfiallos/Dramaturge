@@ -52,13 +52,23 @@ export class SceneManager {
     }
 
     /**
-     * Navega a otra escena.
-     * Inyectado en engine.sceneLoader = (t) => sceneManager.goto(t)
-     * @param {string} target - ej: 'cap01/scene_02'
+     * Navega a otra escena con transición de color opcional.
+     * Inyectado en engine.sceneLoader = (t, f) => sceneManager.goto(t, f)
+     * @param {string}      target    - ej: 'cap01/scene_02'
+     * @param {string|null} fadeColor - 'black' | 'white' | null
      */
-    async goto(target) {
-        console.log(`[SceneManager] goto → "${target}".`);
-        await this._loadAndRun(target);
+    async goto(target, fadeColor = null) {
+        console.log(`[SceneManager] goto → "${target}"${fadeColor ? ` fade:${fadeColor}` : ''}.`);
+
+        if (fadeColor) {
+            // Cargar el script mientras el negro cubre la pantalla,
+            // pero no ejecutar todavía — el fade out dispara el primer next().
+            await this._fadeTransition(fadeColor, async () => {
+                await this.loadOnly(target);
+            });
+        } else {
+            await this._loadAndRun(target);
+        }
     }
 
     /**
@@ -149,5 +159,81 @@ export class SceneManager {
             console.error(`[SceneManager] Error de red al cargar "${url}":`, err.message);
             return null;
         }
+    }
+
+    /**
+     * Transición de fundido estructural entre capítulos.
+     *
+     * Tiempos deliberadamente lentos — esta no es una transición expresiva
+     * sino una señal al jugador de que algo importante está cambiando.
+     * El escritor no controla la duración: es una decisión del motor.
+     *
+     * Secuencia:
+     *   1. Fade IN  → 800ms  (pantalla se oscurece)
+     *   2. Hold     → 300ms  (negro total — aquí se limpia la escena)
+     *   3. La escena nueva carga mientras el negro está activo
+     *   4. Fade OUT → 800ms  (pantalla aparece con el nuevo estado)
+     *
+     * El input queda bloqueado durante toda la transición.
+     * El skip mode no puede saltarse este momento.
+     *
+     * @param {'black'|'white'} color
+     * @returns {Promise<void>}
+     */
+    _fadeTransition(color, onReady = null) {
+        return new Promise((resolve) => {
+            const el = document.getElementById('scene-transition');
+            if (!el) { resolve(); return; }
+
+            const FADE_IN_MS  = 800;
+            const HOLD_MS     = 300;
+            const FADE_OUT_MS = 800;
+
+            // Bloquear input durante toda la transición
+            this.engine.isBlocked = true;
+
+            el.style.background    = color === 'white' ? '#ffffff' : '#000000';
+            el.style.transition    = `opacity ${FADE_IN_MS}ms ease`;
+            el.style.pointerEvents = 'all';
+            el.style.opacity       = '0';
+
+            // Forzar reflow para que la transición CSS arranque desde 0
+            void el.offsetHeight;
+
+            // ── Fase 1: Fade IN ───────────────────────────────────────────────
+            el.style.opacity = '1';
+
+            setTimeout(() => {
+
+                // ── Fase 2: Hold — limpiar escena mientras el negro cubre todo ──
+                this.engine.renderer.clearScene?.();
+                this.engine.activePawns.clear();
+                this.engine.slots = { left: null, center: null, right: null };
+
+                // La escena nueva se carga aquí (el caller hace _loadAndRun tras resolve)
+                setTimeout(async () => {
+                    // Cargar el script mientras el negro está activo
+                    await onReady?.();
+
+                    resolve();
+
+                    // ── Fase 3: Fade OUT — tras cargar la escena nueva ────────
+                    el.style.transition = `opacity ${FADE_OUT_MS}ms ease`;
+                    void el.offsetHeight;
+                    el.style.opacity = '0';
+
+                    setTimeout(() => {
+                        el.style.pointerEvents = 'none';
+                        // Desbloquear input y arrancar la primera instrucción
+                        // automáticamente — el jugador no necesita hacer clic
+                        // para salir del negro.
+                        this.engine.isBlocked = false;
+                        this.engine.next();
+                    }, FADE_OUT_MS);
+
+                }, HOLD_MS);
+
+            }, FADE_IN_MS);
+        });
     }
 }

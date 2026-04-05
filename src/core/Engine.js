@@ -388,18 +388,9 @@ export class Dramaturge {
                     break;
                 }
 
-                if (inst.transition && this.renderer?.sceneTransition) {
-                    // Fase 1: fade IN (oscurece la pantalla, ~480ms)
-                    // Cargamos la escena mientras la pantalla está oscura/blanca
-                    // para que el jugador nunca vea el swap de assets.
-                    const halfMs = 480;
-                    this.renderer.sceneTransition(inst.transition, halfMs); // no await — corre en paralelo
-                    await new Promise(r => setTimeout(r, halfMs));          // esperar que tape la pantalla
-                    await this.sceneLoader(inst.target);                    // cargar nueva escena
-                    // Fase 2: el fade OUT lo completa sceneTransition internamente
-                } else {
-                    await this.sceneLoader(inst.target);
-                }
+                // fadeColor viene del parser: 'black' | 'white' | undefined
+                // SceneManager gestiona la transición visual antes de cargar la escena.
+                await this.sceneLoader(inst.target, inst.fadeColor ?? null);
                 break;
             }
 
