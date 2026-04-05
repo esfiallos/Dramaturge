@@ -24,7 +24,7 @@ const sceneManager = new SceneManager(engine, parser);
 // Resolvers inyectados — el Engine no importa estos módulos directamente
 const puzzleSystem = new PuzzleSystem(db, state);
 engine.puzzleResolver = (id)     => puzzleSystem.open(id);
-engine.sceneLoader    = (target) => sceneManager.goto(target);
+engine.sceneLoader    = (target, fadeColor) => sceneManager.goto(target, fadeColor);
 
 // Menú principal — orquesta el flujo completo
 const menu = new MenuSystem({

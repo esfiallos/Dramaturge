@@ -67,9 +67,11 @@ export const KDN_GRAMMAR = {
     PUZZLE: /^puzzle\s+(?<puzzleId>\w+)\s+pass:"(?<passText>[^"]+)"\s+fail:"(?<failText>[^"]+)"/,
 
     // goto cap01/scene_02
+    // goto cap01/scene_02 fade:black
+    // goto cap01/scene_02 fade:white
     // Soporta rutas con slashes para organización por capítulo/escena.
-    // Ejemplos válidos: goto intro, goto cap01/scene_02, goto cap02/final
-    GOTO: /^goto\s+(?<target>[\w/]+)/,
+    // El parámetro fade es opcional. Color soportado: black | white.
+    GOTO: /^goto\s+(?<target>[\w/]+)(?:\s+fade:(?<fadeColor>black|white))?/,
 
     // ── Estado del juego ──────────────────────────────────────────────────────
 

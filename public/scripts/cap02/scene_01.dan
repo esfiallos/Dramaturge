@@ -13,9 +13,8 @@ pawn valeria, miki
 bg.set forest fade 2s
 audio.bgm play[track_01] 0.35
 
-narrate "La mansión Voss llevaba décadas abandonada. Nadie entraba por voluntad propia."
+valeria:neutral "Aldric. Ese nombre aparece en todos los marcos." [001]
 
-narrate "Valeria entró."
 
 show valeria:neutral at center fade
 
@@ -26,10 +25,13 @@ else
      valeria:triste "Vine sola. Supongo que así tenía que ser."
 endif
 
+narrate "La mansión Voss llevaba décadas abandonada. Nadie entraba por voluntad propia."
+
+narrate "Valeria entró."
+
 # ── Exploración con narración ─────────────────────────
 narrate "Las paredes guardaban retratos de una familia que el pueblo prefería olvidar. Cada rostro miraba desde el mismo ángulo. Como si todos supieran algo."
 
-valeria:neutral "Aldric. Ese nombre aparece en todos los marcos." [001]
 
 # ── Puzzle de texto libre — el nombre del fundador ───
 audio.se play[rain_ambience] 0.5
