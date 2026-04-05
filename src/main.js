@@ -93,3 +93,14 @@ async function init() {
 }
 
 init();
+// ── Service Worker — registro PWA ─────────────────────────────────────────────
+// Solo en producción y si el navegador lo soporta.
+// En desarrollo (npm run dev) el SW no se registra para no interferir con HMR.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker
+            .register(`${import.meta.env.BASE_URL}sw.js`)
+            .then((reg) => console.log('[SW] Registrado:', reg.scope))
+            .catch((err) => console.warn('[SW] Error al registrar:', err));
+    });
+}

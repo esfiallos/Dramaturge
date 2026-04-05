@@ -2,7 +2,8 @@
 import { defineConfig } from 'vite';
 import { resolve }      from 'path';
 
-// En GitHub Pages el juego se sirve desde /dramaturge/ (nombre del repo).
+
+// En GitHub Pages el juego se sirve desde /Dramaturge/ (nombre del repo).
 // En desarrollo y en un dominio propio se sirve desde /.
 // La variable VITE_BASE permite sobreescribir esto si el repo tiene otro nombre
 // o si se despliega en un dominio propio con CNAME.
@@ -23,7 +24,7 @@ export default defineConfig({
     build: {
         rollupOptions: {
             input: {
-                // Producción: solo el entry real. /dev/ no se publica.
+                // Solo el entry de producción. /dev/ no se publica.
                 main: resolve(__dirname, 'index.html'),
             },
         },
