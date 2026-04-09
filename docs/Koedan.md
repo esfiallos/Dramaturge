@@ -180,6 +180,42 @@ El `title` es opcional. Si se omite, la galería muestra el ID como etiqueta. La
 
 A diferencia de `set flag.*`, el desbloqueo es irreversible por diseño — no hay instrucción para bloquear de nuevo un CG.
 
+## Efectos de pantalla
+
+### Shake
+
+```
+fx shake 0.4s
+fx shake 1s
+fx shake 200ms
+```
+
+Sacude el canvas lateralmente durante la duración indicada. La intensidad decae hacia el final — el movimiento es más fuerte al principio y se amortigua solo. Bloquea hasta que termina.
+
+### Flash
+
+```
+fx flash white 0.3s
+fx flash black 0.5s
+```
+
+Destello de color sobre toda la pantalla. La duración se divide en dos mitades iguales: fade in y fade out. Bloquea hasta que el destello desaparece completamente.
+
+Colores soportados: `white` · `black`
+
+### Vignette
+
+```
+fx vignette on
+fx vignette off
+```
+
+Activa o desactiva un oscurecimiento de bordes sobre el canvas. La transición de encendido/apagado es suave (~500ms) pero no bloquea — la siguiente instrucción se ejecuta inmediatamente.
+
+Útil para sostener tensión durante una secuencia sin interrumpir el flujo de diálogo.
+
+---
+
 ## Condicionales
 
 ```

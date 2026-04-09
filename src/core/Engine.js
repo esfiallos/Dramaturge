@@ -394,6 +394,31 @@ export class Dramaturge {
                 break;
             }
 
+            // ── Efectos de pantalla ───────────────────────────────────────────────
+
+            case 'FX_SHAKE': {
+                // Bloquea hasta que termina la animación de shake.
+                const ms = this._parseDuration(inst.duration);
+                await this.renderer.fxShake(ms);
+                await this._nextInternal();
+                break;
+            }
+
+            case 'FX_FLASH': {
+                // Bloquea hasta que el flash desaparece completamente.
+                const ms = this._parseDuration(inst.duration);
+                await this.renderer.fxFlash(inst.color, ms);
+                await this._nextInternal();
+                break;
+            }
+
+            case 'FX_VIGNETTE': {
+                // Instantáneo — no bloquea.
+                this.renderer.fxVignette(inst.state === 'on');
+                await this._nextInternal();
+                break;
+            }
+
             // ── Estado ─────────────────────────────────────────────────────────
 
             case 'SET_FLAG': {

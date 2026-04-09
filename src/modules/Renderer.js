@@ -12,7 +12,7 @@ import { Application, Assets, Sprite, Container } from 'pixi.js';
 
 // ─── Constantes de configuración ─────────────────────────────────────────────
 
-const SLOT_X              = { left: 0.20, center: 0.50, right: 0.80 };
+const SLOT_X   = { left: 0.20, center: 0.50, right: 0.80 };
 
 // Formatos de imagen soportados en orden de preferencia.
 // Si el path ya tiene extensión conocida, se usa directamente.
@@ -629,6 +629,125 @@ export class Renderer {
             };
             this.app.ticker.add(tick);
         });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EFECTOS DE PANTALLA
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Sacude el stage de PixiJS lateralmente durante la duración indicada.
+     * Usa el PixiJS Ticker para sincronizar con el loop de render.
+     * Bloquea hasta que termina — el Engine hace await antes de _nextInternal().
+     *
+     * @param {number} durationMs - Duración total del shake en milisegundos
+     * @returns {Promise<void>}
+     */
+    fxShake(durationMs) {
+        return new Promise(resolve => {
+            const stage      = this.app.stage;
+            const originX    = stage.x;
+            const originY    = stage.y;
+            const intensity  = 8;  // píxeles máximos de desplazamiento
+            const start      = performance.now();
+
+            const tick = () => {
+                const elapsed = performance.now() - start;
+                const t       = Math.min(elapsed / durationMs, 1);
+
+                // La intensidad decae conforme se acerca al final (ease-out)
+                const decay     = 1 - t;
+                const amplitude = intensity * decay;
+
+                stage.x = originX + (Math.random() * 2 - 1) * amplitude;
+                stage.y = originY + (Math.random() * 2 - 1) * amplitude * 0.5;
+
+                if (t >= 1) {
+                    // Restaurar posición exacta al terminar
+                    stage.x = originX;
+                    stage.y = originY;
+                    this.app.ticker.remove(tick);
+                    resolve();
+                }
+            };
+
+            this.app.ticker.add(tick);
+        });
+    }
+
+    /**
+     * Flash de color sobre toda la pantalla.
+     * Usa un overlay DOM encima del canvas — más simple que un sprite PixiJS
+     * y garantiza que tape absolutamente todo (HUD incluido si se desea).
+     * Bloquea hasta que el overlay desaparece completamente.
+     *
+     * @param {'white'|'black'} color
+     * @param {number}          durationMs - Duración del ciclo completo (flash in + out)
+     * @returns {Promise<void>}
+     */
+    fxFlash(color, durationMs) {
+        return new Promise(resolve => {
+            // Reutilizar #scene-transition si existe, o crear un overlay temporal
+            let overlay = document.getElementById('fx-flash-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'fx-flash-overlay';
+                Object.assign(overlay.style, {
+                    position:      'absolute',
+                    inset:         '0',
+                    zIndex:        '20',
+                    pointerEvents: 'none',
+                    opacity:       '0',
+                });
+                document.getElementById('viewport')?.appendChild(overlay);
+            }
+
+            const halfMs = durationMs / 2;
+
+            overlay.style.background  = color === 'white' ? '#ffffff' : '#000000';
+            overlay.style.transition  = `opacity ${halfMs}ms ease`;
+            overlay.style.opacity     = '0';
+
+            // Forzar reflow
+            void overlay.offsetHeight;
+
+            // Flash IN
+            overlay.style.opacity = '1';
+
+            setTimeout(() => {
+                // Flash OUT
+                overlay.style.opacity = '0';
+                setTimeout(() => resolve(), halfMs);
+            }, halfMs);
+        });
+    }
+
+    /**
+     * Activa o desactiva una viñeta (oscurecimiento de bordes) sobre el canvas.
+     * Instantáneo — no bloquea el engine.
+     * Usa un elemento DOM con gradiente radial para evitar afectar el render PixiJS.
+     *
+     * @param {boolean} active - true = encender, false = apagar
+     */
+    fxVignette(active) {
+        let vignette = document.getElementById('fx-vignette-overlay');
+
+        if (!vignette) {
+            vignette = document.createElement('div');
+            vignette.id = 'fx-vignette-overlay';
+            Object.assign(vignette.style, {
+                position:      'absolute',
+                inset:         '0',
+                zIndex:        '15',
+                pointerEvents: 'none',
+                background:    'radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.72) 100%)',
+                opacity:       '0',
+                transition:    'opacity 0.5s ease',
+            });
+            document.getElementById('viewport')?.appendChild(vignette);
+        }
+
+        vignette.style.opacity = active ? '1' : '0';
     }
 }
 
