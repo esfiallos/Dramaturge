@@ -56,6 +56,11 @@ const PARSE_RULES = [
     { regex: KDN_GRAMMAR.SET_FLAG,         type: 'SET_FLAG'         },
     { regex: KDN_GRAMMAR.UNLOCK,           type: 'UNLOCK'           },
 
+    // ── Efectos de pantalla ──────────────────────────────────────────────────────
+    { regex: KDN_GRAMMAR.FX_SHAKE,    type: 'FX_SHAKE'    },
+    { regex: KDN_GRAMMAR.FX_FLASH,    type: 'FX_FLASH'    },
+    { regex: KDN_GRAMMAR.FX_VIGNETTE, type: 'FX_VIGNETTE' },
+
     // ── Condicionales (marcadores de bloque — el segundo pase los compila a saltos) ──
     { regex: KDN_GRAMMAR.IF_FLAG,      type: 'IF_FLAG'      },
     { regex: KDN_GRAMMAR.IF_INVENTORY, type: 'IF_INVENTORY' },

@@ -81,4 +81,13 @@ set flag.cap01_completo = true
 valeria:sorpresa "Al capitulo 2"
 # ── Transición al siguiente capítulo ─────────────────
 
+
+fx shake 0.4s
+fx flash white 0.3s
+fx vignette on
+narrate "La sala tembló."
+fx vignette off
+
+
 goto cap02/scene_01 fade:black
+

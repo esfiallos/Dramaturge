@@ -67,11 +67,23 @@ export const KDN_GRAMMAR = {
     PUZZLE: /^puzzle\s+(?<puzzleId>\w+)\s+pass:"(?<passText>[^"]+)"\s+fail:"(?<failText>[^"]+)"/,
 
     // goto cap01/scene_02
-    // goto cap01/scene_02 fade:black
-    // goto cap01/scene_02 fade:white
     // Soporta rutas con slashes para organización por capítulo/escena.
-    // El parámetro fade es opcional. Color soportado: black | white.
-    GOTO: /^goto\s+(?<target>[\w/]+)(?:\s+fade:(?<fadeColor>black|white))?/,
+    // Ejemplos válidos: goto intro, goto cap01/scene_02, goto cap02/final
+    GOTO: /^goto\s+(?<target>[\w/]+)/,
+
+    // ── Efectos de pantalla ──────────────────────────────────────────────────
+    //
+    // fx shake 0.4s
+    // fx flash white 0.3s
+    // fx flash black 0.5s
+    // fx vignette on
+    // fx vignette off
+    //
+    // shake y flash tienen duración obligatoria (s o ms).
+    // vignette es un toggle instantáneo — on | off.
+    FX_SHAKE:   /^fx\s+shake\s+(?<duration>\d+(?:\.\d+)?(?:s|ms))/,
+    FX_FLASH:   /^fx\s+flash\s+(?<color>white|black)\s+(?<duration>\d+(?:\.\d+)?(?:s|ms))/,
+    FX_VIGNETTE:/^fx\s+vignette\s+(?<state>on|off)/,
 
     // ── Estado del juego ──────────────────────────────────────────────────────
 
