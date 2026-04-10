@@ -170,7 +170,7 @@ export class SlotPanel {
      * @param {SlotData|null} slotData
      */
     #buildSlotElement(slotId, displayName, slotData) {
-        const isEmpty  = slotData === null;
+        const isEmpty = slotData === null || slotData.savedAt === null;
         const slotItem = document.createElement('div');
         slotItem.className = `dm-slot-item${isEmpty ? ' dm-slot-item--empty' : ''}`;
 

@@ -140,7 +140,12 @@ export class Dramaturge {
             }
         }
 
-        // 3. Modo de textbox
+        // 3. BGM activo al momento del guardado
+        if (vs.bgm?.track) {
+            await this.audio.playBGM(vs.bgm.track, vs.bgm.vol ?? 0.5);
+        }
+
+        // 4. Modo de textbox
         if (vs.mode === 'narrate') {
             this.renderer._setNarrationMode?.(true);
             this._lastTextMode = 'narrate';
@@ -266,7 +271,9 @@ export class Dramaturge {
 
             case 'AUDIO': {
                 if (inst.audioType === 'bgm') {
-                    this.audio.playBGM(inst.param, parseFloat(inst.vol ?? 0.5));
+                    const bgmVolume = parseFloat(inst.vol ?? 0.5);
+                    this.audio.playBGM(inst.param, bgmVolume);
+                    this.state.visualState.bgm = { track: inst.param, vol: bgmVolume };
                 } else if (inst.audioType === 'se') {
                     this.audio.playSE(inst.param, parseFloat(inst.vol ?? 0.8));
                 }
@@ -388,34 +395,18 @@ export class Dramaturge {
                     break;
                 }
 
-                // fadeColor viene del parser: 'black' | 'white' | undefined
-                // SceneManager gestiona la transición visual antes de cargar la escena.
-                await this.sceneLoader(inst.target, inst.fadeColor ?? null);
-                break;
-            }
-
-            // ── Efectos de pantalla ───────────────────────────────────────────────
-
-            case 'FX_SHAKE': {
-                // Bloquea hasta que termina la animación de shake.
-                const ms = this._parseDuration(inst.duration);
-                await this.renderer.fxShake(ms);
-                await this._nextInternal();
-                break;
-            }
-
-            case 'FX_FLASH': {
-                // Bloquea hasta que el flash desaparece completamente.
-                const ms = this._parseDuration(inst.duration);
-                await this.renderer.fxFlash(inst.color, ms);
-                await this._nextInternal();
-                break;
-            }
-
-            case 'FX_VIGNETTE': {
-                // Instantáneo — no bloquea.
-                this.renderer.fxVignette(inst.state === 'on');
-                await this._nextInternal();
+                if (inst.transition && this.renderer?.sceneTransition) {
+                    // Fase 1: fade IN (oscurece la pantalla, ~480ms)
+                    // Cargamos la escena mientras la pantalla está oscura/blanca
+                    // para que el jugador nunca vea el swap de assets.
+                    const halfMs = 480;
+                    this.renderer.sceneTransition(inst.transition, halfMs); // no await — corre en paralelo
+                    await new Promise(r => setTimeout(r, halfMs));          // esperar que tape la pantalla
+                    await this.sceneLoader(inst.target);                    // cargar nueva escena
+                    // Fase 2: el fade OUT lo completa sceneTransition internamente
+                } else {
+                    await this.sceneLoader(inst.target);
+                }
                 break;
             }
 

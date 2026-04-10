@@ -591,13 +591,16 @@ export class MenuSystem {
 
     /** @returns {SlotRecord[]} */
     #buildSlotDataArray() {
-        return MenuSystem.#SLOT_IDS.map(slotId => ({
+    return MenuSystem.#SLOT_IDS.map(slotId => {
+        const cachedSlot = this.#cachedSlots[slotId];
+        return {
             slotId,
             displayName: MenuSystem.#SLOT_DISPLAY_NAMES[slotId],
-            savedAt:     this.#cachedSlots[slotId]?.savedAt     ?? null,
-            currentFile: this.#cachedSlots[slotId]?.currentFile ?? null,
-        }));
-    }
+            savedAt:     cachedSlot?.savedAt     ?? null,
+            currentFile: cachedSlot?.currentFile ?? null,
+        };
+    });
+}
 
     #refreshMainMenuButtonStates() {
         const anySlotHasData = Object.values(this.#cachedSlots).some(Boolean);
