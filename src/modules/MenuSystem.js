@@ -1,10 +1,10 @@
 // src/modules/MenuSystem.js
 
-import { SlotPanel }    from './panels/SlotPanel.js';
+import { SlotPanel }    from './panels/SlotPanel..js';
 import { AudioPanel }   from './panels/AudioPanel.js';
-import { BacklogPanel } from './panels/BacklogPanel.js';
-import { GalleryPanel } from './panels/GalleryPanel.js';
-import { ModalPanel }   from './panels/ModalPanel.js';
+import { BacklogPanel } from './panels/Backlogpanel.js';
+import { GalleryPanel } from './panels/Gallerypanel.js';
+import { ModalPanel }   from './panels/Modalpanel.js';
 
 /**
  * @typedef {'MAIN_MENU' | 'LOADING' | 'IN_GAME' | 'PAUSED'} MenuState
