@@ -1,880 +1,672 @@
 // src/modules/MenuSystem.js
-//
-// ARQUITECTURA — Máquina de estados + paneles flotantes
-//
-// ESTADOS:
-//   MAIN_MENU → LOADING → IN_GAME ↔ PAUSED
-//
-// REGLA DE ORO:
-//   Solo #main-menu, #hud y #pause-menu viven en index.html.
-//   Todos los paneles secundarios (slots, ajustes, audio, modal, toast, loading)
-//   son creados por MenuSystem y appended directamente a document.body.
-//   Así son independientes de la jerarquía del DOM y siempre visibles.
-//
-// BOTONES:
-//   Menú principal  → "Continuar"      = abre slot-panel (load)
-//                  → "Cargar Partida"  = abre slot-panel (load)  [alias de Continuar]
-//                  → "Nueva Partida"   = empieza desde cero
-//   Pausa           → "Continuar"      = cierra la pausa, vuelve al juego
-//                  → "Guardar"         = abre slot-panel (save)
-//                  → "Cargar"          = abre slot-panel (load)
-//                  → "Ajustes"         = abre panel de ajustes
-//                  → "Menú Principal"  = modal de confirmación → MAIN_MENU
-//   HUD             → "Guardar"        = quicksave a slot_1
-//                  → "Pausa"           = abre pausa
-//                  → "Salir"           = autosave + MAIN_MENU directo
 
+import { SlotPanel }    from './panels/SlotPanel.js';
+import { AudioPanel }   from './panels/AudioPanel.js';
+import { BacklogPanel } from './panels/BacklogPanel.js';
+import { GalleryPanel } from './panels/GalleryPanel.js';
+import { ModalPanel }   from './panels/ModalPanel.js';
+
+/**
+ * @typedef {'MAIN_MENU' | 'LOADING' | 'IN_GAME' | 'PAUSED'} MenuState
+ */
+
+/**
+ * @typedef {Object} MenuSystemConfig
+ * @property {import('../core/Engine.js').Dramaturge}         engine
+ * @property {import('../core/SaveManager.js').SaveManager}   saveManager
+ * @property {import('../core/SceneManager.js').SceneManager} sceneManager
+ * @property {import('../modules/Audio.js').AudioManager}     audio
+ * @property {string} startScene
+ * @property {string} gameTitle
+ * @property {string} gameSubtitle
+ */
+
+/**
+ * @typedef {Object} SlotRecord
+ * @property {string}      slotId
+ * @property {string}      displayName
+ * @property {number|null} savedAt
+ * @property {string|null} currentFile
+ */
+
+/**
+ * Orquestador principal del flujo de menús y estado de la aplicación.
+ *
+ * Responsabilidad única: coordinar la máquina de estados, los paneles
+ * y los módulos del engine. No construye DOM — delega en los paneles.
+ *
+ * Estados posibles:
+ *   MAIN_MENU → LOADING → IN_GAME ↔ PAUSED
+ */
 export class MenuSystem {
 
-    static STATES = {
+    static STATES = /** @type {Record<MenuState, MenuState>} */ ({
         MAIN_MENU: 'MAIN_MENU',
         LOADING:   'LOADING',
         IN_GAME:   'IN_GAME',
         PAUSED:    'PAUSED',
+    });
+
+    static #SLOT_IDS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
+
+    static #SLOT_DISPLAY_NAMES = {
+        autosave: 'Autoguardado',
+        slot_1:   'Ranura 1',
+        slot_2:   'Ranura 2',
+        slot_3:   'Ranura 3',
     };
 
-    /** Estado actual — leído por InputGate en main.js */
-    get state() { return this._state; }
+    // ── Dependencias ───────────────────────────────────────────────────────
 
-    /** True si el backlog está abierto — leído por InputGate */
-    get backlogOpen() { return this._isBacklogOpen(); }
+    /** @type {import('../core/Engine.js').Dramaturge} */
+    #engine;
 
-    constructor({ engine, saveManager, sceneManager, audio,
-                  startScene   = 'cap01/scene_01',
-                  gameTitle    = 'DRAMATURGE',
-                  gameSubtitle = 'Novela Visual' }) {
+    /** @type {import('../core/SaveManager.js').SaveManager} */
+    #saveManager;
 
-        this.engine       = engine;
-        this.saveManager  = saveManager;
-        this.sceneManager = sceneManager;
-        this.audio        = audio;
-        this.startScene   = startScene;
-        this.gameTitle    = gameTitle;
-        this.gameSubtitle = gameSubtitle;
+    /** @type {import('../core/SceneManager.js').SceneManager} */
+    #sceneManager;
 
-        this._state      = null;
-        this._busy       = false;
-        this._saves      = {};
-        this._autosave   = null;
-        this._savesReady = null;
-        this._els        = {};
-        this._toastTimer = null;
+    /** @type {import('../modules/Audio.js').AudioManager} */
+    #audio;
+
+    // ── Configuración ──────────────────────────────────────────────────────
+
+    /** @type {string} */
+    #startScene;
+
+    /** @type {string} */
+    #gameTitle;
+
+    /** @type {string} */
+    #gameSubtitle;
+
+    // ── Estado interno ─────────────────────────────────────────────────────
+
+    /** @type {MenuState} */
+    #currentState = null;
+
+    /** @type {boolean} — bloquea acciones mientras una operación async está en curso */
+    #isBusy = false;
+
+    /** @type {Record<string, SlotRecord|null>} */
+    #cachedSlots = {};
+
+    /** @type {Promise<void>|null} */
+    #slotLoadingPromise = null;
+
+    // ── Paneles ────────────────────────────────────────────────────────────
+
+    /** @type {SlotPanel} */
+    #slotPanel;
+
+    /** @type {AudioPanel} */
+    #audioPanel;
+
+    /** @type {BacklogPanel} */
+    #backlogPanel;
+
+    /** @type {GalleryPanel} */
+    #galleryPanel;
+
+    /** @type {ModalPanel} */
+    #modalPanel;
+
+    // ── Elementos estáticos del DOM (existen en index.html) ───────────────
+
+    /** @type {Record<string, HTMLElement|null>} */
+    #staticElements = {};
+
+    // ── Temporizadores ─────────────────────────────────────────────────────
+
+    /** @type {ReturnType<typeof setInterval>|null} */
+    #hudClockInterval = null;
+
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    #toastTimer = null;
+
+    /** @param {MenuSystemConfig} config */
+    constructor(config) {
+        this.#engine       = config.engine;
+        this.#saveManager  = config.saveManager;
+        this.#sceneManager = config.sceneManager;
+        this.#audio        = config.audio;
+        this.#startScene   = config.startScene;
+        this.#gameTitle    = config.gameTitle;
+        this.#gameSubtitle = config.gameSubtitle;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // INIT
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── API pública ────────────────────────────────────────────────────────
+
+    /** @returns {MenuState} */
+    get state() { return this.#currentState; }
+
+    /** @returns {boolean} */
+    get backlogOpen() { return this.#backlogPanel?.isOpen ?? false; }
 
     async init() {
-        this._bindStaticEls();  // elementos que existen en index.html
-        this._buildPanels();    // paneles creados dinámicamente en body
-        this._populateMenu();
-        this._bindEvents();
-        this._setState(MenuSystem.STATES.MAIN_MENU);
-        this._savesReady = this._loadSaves();
+        this.#bindStaticElements();
+        this.#mountPanels();
+        this.#populateStaticMenuContent();
+        this.#bindAllEvents();
+        this.#transitionToState(MenuSystem.STATES.MAIN_MENU);
+        this.#slotLoadingPromise = this.#loadAllSlots();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MÁQUINA DE ESTADOS
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Máquina de estados ─────────────────────────────────────────────────
 
-    _setState(newState) {
-        this._state = newState;
-        const S = MenuSystem.STATES;
+    /** @param {MenuState} newState */
+    #transitionToState(newState) {
+        this.#currentState = newState;
+        const states = MenuSystem.STATES;
 
-        // Ocultar absolutamente todo
-        this._els.mainMenu?.classList.add('hidden');
-        this._els.hud?.classList.remove('visible');
-        this._els.pauseMenu?.classList.remove('visible');
-        this._closeAllPanels();
-        this.engine.isBlocked = false;
+        this.#staticElements.mainMenu?.classList.add('hidden');
+        this.#staticElements.hud?.classList.remove('visible');
+        this.#staticElements.pauseMenu?.classList.remove('visible');
+        this.#engine.isBlocked = false;
 
         switch (newState) {
-            case S.MAIN_MENU:
-                this._els.mainMenu?.classList.remove('hidden');
-                this._stopHUDClock();
-                this._updateMainMenuButtons();
+            case states.MAIN_MENU:
+                this.#staticElements.mainMenu?.classList.remove('hidden');
+                this.#stopHudClock();
+                this.#refreshMainMenuButtonStates();
                 break;
 
-            case S.LOADING:
-                // El loading overlay se maneja con _showLoading/_hideLoading
+            case states.LOADING:
                 break;
 
-            case S.IN_GAME:
-                this._els.hud?.classList.add('visible');
-                this._updateHUDInfo();
-                this._startHUDClock();
-                // Restaurar audio si veníamos de pausa
-                this.audio.pauseUnduck?.();
+            case states.IN_GAME:
+                this.#staticElements.hud?.classList.add('visible');
+                this.#updateHudSceneInfo();
+                this.#startHudClock();
+                this.#audio.pauseUnduck?.();
                 break;
 
-            case S.PAUSED:
-                this._els.hud?.classList.add('visible');
-                this._els.pauseMenu?.classList.add('visible');
-                this.engine.isBlocked = true;
-                // stopModes dispara _skipOnStop → limpia visual del botón skip
-                this.engine.stopModes?.();
-                this._els.btnAuto?.classList.remove('hud-btn--active');
-                this._els.btnSkip?.classList.remove('hud-btn--active');
-                // Atenuar audio en pausa
-                this.audio.pauseDuck?.();
+            case states.PAUSED:
+                this.#staticElements.hud?.classList.add('visible');
+                this.#staticElements.pauseMenu?.classList.add('visible');
+                this.#engine.isBlocked = true;
+                this.#engine.stopModes?.();
+                this.#staticElements.btnAuto?.classList.remove('hud-btn--active');
+                this.#staticElements.btnSkip?.classList.remove('hud-btn--active');
+                this.#audio.pauseDuck?.();
                 break;
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // BIND DOM — solo los elementos que DEBEN estar en index.html
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Binding de elementos estáticos ─────────────────────────────────────
 
-    _bindStaticEls() {
-        const $ = (id) => document.getElementById(id);
-        this._els = {
-            // Menú principal (en index.html)
-            mainMenu:    $('main-menu'),
-            menuTitle:   $('menu-title'),
-            menuSub:     $('menu-subtitle'),
-            btnNew:      $('btn-new-game'),
-            btnLoad:     $('btn-load'),
+    #bindStaticElements() {
+        const byId = (id) => document.getElementById(id);
 
-            // HUD (en index.html)
-            hud:      $('hud'),
-            btnSave:  $('btn-save'),
-            btnPause: $('btn-pause'),
-            btnExit:      $('btn-exit'),
-            btnBacklog:   $('btn-backlog'),
-            btnAuto:      $('btn-auto'),
-            btnSkip:      $('btn-skip'),
-            hudTitle:     $('hud-title'),
-            hudScene:     $('hud-scene'),
-            hudPlaytime:  $('hud-playtime'),
+        this.#staticElements = {
+            mainMenu:     byId('main-menu'),
+            menuTitle:    byId('menu-title'),
+            menuSubtitle: byId('menu-subtitle'),
+            btnNewGame:   byId('btn-new-game'),
+            btnLoadGame:  byId('btn-load'),
+            btnGallery:   byId('btn-gallery'),
 
-            // Menú de pausa (en index.html)
-            pauseMenu:    $('pause-menu'),
-            btnResume:    $('btn-resume'),
-            btnSaveSlot:  $('btn-save-slot'),
-            btnLoadSlot:  $('btn-load-slot'),
-            btnSettings:  $('btn-settings'),
-            btnMainMenu:  $('btn-main-menu'),
+            hud:          byId('hud'),
+            btnSave:      byId('btn-save'),
+            btnPause:     byId('btn-pause'),
+            btnExit:      byId('btn-exit'),
+            btnBacklog:   byId('btn-backlog'),
+            btnAuto:      byId('btn-auto'),
+            btnSkip:      byId('btn-skip'),
+            hudTitle:     byId('hud-title'),
+            hudScene:     byId('hud-scene'),
+            hudPlaytime:  byId('hud-playtime'),
+
+            pauseMenu:    byId('pause-menu'),
+            btnResume:    byId('btn-resume'),
+            btnSaveSlot:  byId('btn-save-slot'),
+            btnLoadSlot:  byId('btn-load-slot'),
+            btnSettings:  byId('btn-settings'),
+            btnMainMenu:  byId('btn-main-menu'),
+
+            loadingOverlay: null,
+            loadingMessage: null,
+            toastElement:   null,
         };
+
+        this.#buildLoadingOverlay();
+        this.#buildToastElement();
     }
 
+    // ── Montaje de paneles ─────────────────────────────────────────────────
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // AUTO / SKIP
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _toggleAuto() {
-        const active = this.engine.toggleAuto();
-        this._els.btnAuto?.classList.toggle('hud-btn--active', active);
-        this._els.btnSkip?.classList.remove('hud-btn--active');
-    }
-
-    _triggerSkip() {
-        const btn = this._els.btnSkip;
-        const active = this.engine.triggerSkip(() => {
-            // Callback: skip paró solo (llegó a contenido nuevo o fue cancelado)
-            btn?.classList.remove('hud-btn--active');
+    #mountPanels() {
+        this.#slotPanel = new SlotPanel([], {
+            onSaveRequested:   (slotId) => this.#handleSaveToSlot(slotId),
+            onLoadRequested:   (slotId) => this.#handleLoadFromSlot(slotId),
+            onDeleteRequested: (slotId, displayName) => this.#handleDeleteSlot(slotId, displayName),
+            onClose:           () => this.#slotPanel.hide(),
         });
-        // true = skip arrancó, false = no hay nada que skipear o se canceló
-        btn?.classList.toggle('hud-btn--active', active);
-        if (active) {
-            // Quitar auto si estaba activo
-            this._els.btnAuto?.classList.remove('hud-btn--active');
-        }
-    }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // HUD INFO
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _updateHUDInfo() {
-        if (this._els.hudTitle)
-            this._els.hudTitle.textContent = this.gameTitle;
-
-        const file = this.engine.state.currentFile ?? '';
-        // "cap01/scene_02.dan" → "Cap 01 · Escena 02"
-        const parts = file.replace('.dan', '').split('/');
-        const sceneLabel = parts
-            .map(p => p.replace(/_/g, ' ').replace(/\w/g, l => l.toUpperCase()))
-            .join(' · ');
-        if (this._els.hudScene)
-            this._els.hudScene.textContent = sceneLabel;
-    }
-
-    _startHUDClock() {
-        this._stopHUDClock();
-        this._hudClockInterval = setInterval(() => {
-            if (this._state !== MenuSystem.STATES.IN_GAME) return;
-            const total = (this.engine.state.playTime ?? 0) +
-                Math.floor((Date.now() - (this.engine._sessionStart ?? Date.now())) / 1000);
-            const h = Math.floor(total / 3600);
-            const m = Math.floor((total % 3600) / 60).toString().padStart(2, '0');
-            const s = (total % 60).toString().padStart(2, '0');
-            const label = h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
-            if (this._els.hudPlaytime)
-                this._els.hudPlaytime.textContent = label;
-        }, 1000);
-    }
-
-    _stopHUDClock() {
-        clearInterval(this._hudClockInterval);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // BUILD PANELS — creados en document.body, independientes del DOM
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _buildPanels() {
-        this._buildSlotPanel();
-        this._buildAudioPanel();
-        this._buildGalleryPanel();
-        this._buildBacklogPanel();
-        this._buildModal();
-        this._buildLoadingOverlay();
-        this._buildToast();
-    }
-
-    _buildSlotPanel() {
-        const el = this._createPanel('dm-slot-panel', `
-            <div class="dm-panel__inner">
-                <h2 class="dm-panel__title" id="dm-slot-title">— Cargar Partida —</h2>
-                <div class="dm-slot-list" id="dm-slot-list"></div>
-                <button class="btn-gold dm-panel__back" id="dm-slot-back">← Volver</button>
-            </div>
-        `);
-        this._els.slotPanel  = el;
-        this._els.slotTitle  = document.getElementById('dm-slot-title');
-        this._els.slotList   = document.getElementById('dm-slot-list');
-        document.getElementById('dm-slot-back')
-            ?.addEventListener('click', () => this._closeSlotPanel());
-    }
-
-
-    _buildAudioPanel() {
-        const el = this._createPanel('dm-audio-panel', `
-            <div class="dm-panel__inner">
-                <h2 class="dm-panel__title">— Audio —</h2>
-                <div class="dm-audio-row">
-                    <label>Música</label>
-                    <input type="range" id="dm-slider-bgm" min="0" max="100" value="50">
-                </div>
-                <div class="dm-audio-row">
-                    <label>Efectos</label>
-                    <input type="range" id="dm-slider-se" min="0" max="100" value="80">
-                </div>
-                <div class="dm-audio-row">
-                    <label>Voces</label>
-                    <input type="range" id="dm-slider-voice" min="0" max="100" value="100">
-                </div>
-                <button class="btn-gold dm-panel__back" id="dm-audio-back">← Volver</button>
-            </div>
-        `);
-        this._els.audioPanel   = el;
-        this._els.sliderBGM    = document.getElementById('dm-slider-bgm');
-        this._els.sliderSE     = document.getElementById('dm-slider-se');
-        this._els.sliderVoice  = document.getElementById('dm-slider-voice');
-
-        this._els.sliderBGM?.addEventListener('input', (e) => {
-            const v = e.target.value / 100;
-            this.audio.setVolume('bgm', v);
-            this.engine.state.audioSettings.bgmVolume = v;
+        this.#audioPanel = new AudioPanel({
+            onVolumeChanged: (channel, volume) => this.#handleVolumeChange(channel, volume),
+            onClose:         () => {
+                this.#audioPanel.hide();
+                this.#saveManager.save(this.#engine.state, 'autosave').catch(() => {});
+            },
         });
-        this._els.sliderSE?.addEventListener('input', (e) => {
-            const v = e.target.value / 100;
-            this.audio.setVolume('se', v);
-            this.engine.state.audioSettings.sfxVolume = v;
+
+        this.#backlogPanel = new BacklogPanel({
+            onClose: () => this.#backlogPanel.hide(),
         });
-        this._els.sliderVoice?.addEventListener('input', (e) => {
-            const v = e.target.value / 100;
-            this.audio.setVolume('voice', v);
-            this.engine.state.audioSettings.voiceVolume = v;
+
+        this.#galleryPanel = new GalleryPanel({
+            onClose: () => this.#galleryPanel.hide(),
         });
-        document.getElementById('dm-audio-back')?.addEventListener('click', () => {
-            this._closeAudio();
-            this.saveManager.save(this.engine.state, 'autosave').catch(() => {});
-        });
+
+        this.#modalPanel = new ModalPanel();
+
+        this.#slotPanel.mount(document.body);
+        this.#audioPanel.mount(document.body);
+        this.#backlogPanel.mount(document.body);
+        this.#galleryPanel.mount(document.body);
+        this.#modalPanel.mount(document.body);
     }
 
-    _buildModal() {
-        if (document.getElementById('dm-modal')) return;
-        const el = document.createElement('div');
-        el.id = 'dm-modal';
-        el.className = 'dm-overlay dm-modal dm-hidden';
-        el.innerHTML = `
-            <div class="dm-modal__box">
-                <p class="dm-modal__msg" id="dm-modal-msg"></p>
-                <div class="dm-modal__actions">
-                    <button class="btn-gold" id="dm-modal-confirm"></button>
-                    <button class="btn-gold" id="dm-modal-cancel"></button>
-                </div>
-            </div>`;
-        document.body.appendChild(el);
-        this._els.modal        = el;
-        this._els.modalMsg     = document.getElementById('dm-modal-msg');
-        this._els.modalConfirm = document.getElementById('dm-modal-confirm');
-        this._els.modalCancel  = document.getElementById('dm-modal-cancel');
+    // ── Binding de eventos ─────────────────────────────────────────────────
+
+    #bindAllEvents() {
+        this.#bindMainMenuEvents();
+        this.#bindHudEvents();
+        this.#bindPauseMenuEvents();
+        this.#bindKeyboardEvents();
     }
 
-    _buildLoadingOverlay() {
-        if (document.getElementById('dm-loading')) return;
-        const el = document.createElement('div');
-        el.id = 'dm-loading';
-        el.className = 'dm-overlay dm-loading dm-hidden';
-        el.innerHTML = `<span id="dm-loading-msg">Cargando...</span>`;
-        document.body.appendChild(el);
-        this._els.loadingOverlay = el;
-        this._els.loadingMsg     = document.getElementById('dm-loading-msg');
+    #bindMainMenuEvents() {
+        const on = (element, handler) => element?.addEventListener('click', handler);
+
+        on(this.#staticElements.btnNewGame, () => this.#startNewGame());
+        on(this.#staticElements.btnGallery, () => this.#openGallery());
+        on(this.#staticElements.btnLoadGame, () => this.#openSlotsForLoading());
     }
 
-    _buildToast() {
-        if (document.getElementById('dm-toast')) return;
-        const el = document.createElement('div');
-        el.id = 'dm-toast';
-        el.className = 'dm-toast dm-hidden';
-        document.body.appendChild(el);
-        this._els.toast = el;
-    }
+    #bindHudEvents() {
+        const on = (element, handler) => element?.addEventListener('click', handler);
+        const states = MenuSystem.STATES;
 
-    /** Helper: crea un panel flotante vacío, lo appenda a body y lo devuelve. */
-    _createPanel(id, innerHTML) {
-        if (document.getElementById(id)) return document.getElementById(id);
-        const el = document.createElement('div');
-        el.id = id;
-        el.className = 'dm-overlay dm-panel dm-hidden';
-        el.innerHTML = innerHTML;
-        document.body.appendChild(el);
-        return el;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // EVENTS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _populateMenu() {
-        if (this._els.menuTitle) this._els.menuTitle.textContent = this.gameTitle;
-        if (this._els.menuSub)   this._els.menuSub.textContent   = this.gameSubtitle;
-    }
-
-    _bindEvents() {
-        const on = (el, ev, fn) => el?.addEventListener(ev, fn);
-        const S  = MenuSystem.STATES;
-
-        // ── Menú principal ────────────────────────────────────────────────────
-        on(this._els.btnNew,      'click', () => this._actionNewGame());
-        on(this._els.btnGallery,  'click', () => this._openGallery());
-        // "Continuar" y "Cargar Partida" en menú principal: ambos abren slots (load)
-        on(this._els.btnLoad,     'click', () => this._actionOpenSlots('load'));
-
-        // ── HUD ───────────────────────────────────────────────────────────────
-        on(this._els.btnBacklog, 'click', () => this._openBacklog());
-        on(this._els.btnAuto, 'click', () => this._toggleAuto());
-        on(this._els.btnSkip, 'click', () => this._triggerSkip());
-        on(this._els.btnSave, 'click', () => this._actionQuickSave());
-        on(this._els.btnPause, 'click', () => {
-            if (this._state === S.IN_GAME) this._setState(S.PAUSED);
-        });
-        on(this._els.btnExit, 'click', () => this._actionExitDirect());
-
-        // ── Pausa ─────────────────────────────────────────────────────────────
-        on(this._els.btnResume, 'click', () => {
-            if (this._state === S.PAUSED) this._setState(S.IN_GAME);
-        });
-        on(this._els.btnSaveSlot,  'click', () => this._actionOpenSlots('save'));
-        on(this._els.btnLoadSlot,  'click', () => this._actionOpenSlots('load'));
-        on(this._els.btnSettings,  'click', () => this._openAudio()); // Ajustes = Audio
-        on(this._els.btnMainMenu,  'click', () => this._actionExitConfirm());
-
-        // ── ESC ───────────────────────────────────────────────────────────────
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') this._handleEsc();
-            if (e.key === 'ArrowLeft')  this._lbNavigate?.(-1);
-            if (e.key === 'ArrowRight') this._lbNavigate?.(1);
-            if (e.key === 'l' || e.key === 'L') {
-                if (this._isBacklogOpen()) this._closeBacklog();
-                else this._openBacklog();
+        on(this.#staticElements.btnBacklog, () => this.#openBacklog());
+        on(this.#staticElements.btnAuto,    () => this.#toggleAutoMode());
+        on(this.#staticElements.btnSkip,    () => this.#triggerSkipMode());
+        on(this.#staticElements.btnSave,    () => this.#openSlotsForSaving());
+        on(this.#staticElements.btnPause,   () => {
+            if (this.#currentState === states.IN_GAME) {
+                this.#transitionToState(states.PAUSED);
             }
         });
+        on(this.#staticElements.btnExit, () => this.#exitToMainMenuWithAutosave());
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // ACCIONES
-    // ─────────────────────────────────────────────────────────────────────────
+    #bindPauseMenuEvents() {
+        const on = (element, handler) => element?.addEventListener('click', handler);
+        const states = MenuSystem.STATES;
 
-    async _actionNewGame() {
-        if (this._busy) return;
-        this._busy = true;
+        on(this.#staticElements.btnResume, () => {
+            if (this.#currentState === states.PAUSED) {
+                this.#transitionToState(states.IN_GAME);
+            }
+        });
+        on(this.#staticElements.btnSaveSlot,  () => this.#openSlotsForSaving());
+        on(this.#staticElements.btnLoadSlot,  () => this.#openSlotsForLoading());
+        on(this.#staticElements.btnSettings,  () => this.#openAudioPanel());
+        on(this.#staticElements.btnMainMenu,  () => this.#confirmExitToMainMenu());
+    }
 
-        // 1. Mostrar loading ANTES de cambiar estado — el canvas aún no tiene escena
-        this._showLoading('Iniciando...');
-        this.audio.unlock?.();
+    #bindKeyboardEvents() {
+        document.addEventListener('keydown', (keyboardEvent) => {
+            this.#handleKeyboardInput(keyboardEvent);
+        });
+    }
 
-        // 2. Resetear el engine completamente — borra flags, inventario, sprites,
-        //    backlog y todo el estado narrativo de una partida anterior.
-        //    Nueva partida SIEMPRE empieza desde cero.
-        this.engine.reset();
+    /** @param {KeyboardEvent} keyboardEvent */
+    #handleKeyboardInput(keyboardEvent) {
+        if (keyboardEvent.key === 'Escape')      { this.#handleEscapeKey();       return; }
+        if (keyboardEvent.key === 'ArrowLeft')   { this.#galleryPanel.navigateLightbox(-1); return; }
+        if (keyboardEvent.key === 'ArrowRight')  { this.#galleryPanel.navigateLightbox(1);  return; }
+        if (keyboardEvent.key === 'l' || keyboardEvent.key === 'L') {
+            this.#backlogPanel.isOpen
+                ? this.#backlogPanel.hide()
+                : this.#openBacklog();
+        }
+    }
 
-        // 3. Cargar todos los assets / escena
-        await this.sceneManager.start(this.startScene);
+    // ── Acciones principales ───────────────────────────────────────────────
 
-        // 3. Ahora que el canvas tiene contenido, hacer transición de entrada
-        this._hideLoading();
-        this._setState(MenuSystem.STATES.IN_GAME);
+    async #startNewGame() {
+        if (this.#isBusy) return;
+        this.#isBusy = true;
 
-        // 4. Fade-in del renderer si está disponible (da tiempo a PixiJS a renderizar)
-        if (this.engine.renderer?.fadeIn) {
-            await this.engine.renderer.fadeIn(400);
+        this.#showLoadingOverlay('Iniciando...');
+        this.#audio.unlock?.();
+        this.#engine.reset();
+
+        await this.#sceneManager.start(this.#startScene);
+
+        this.#hideLoadingOverlay();
+        this.#transitionToState(MenuSystem.STATES.IN_GAME);
+
+        if (this.#engine.renderer?.fadeIn) {
+            await this.#engine.renderer.fadeIn(400);
         }
 
-        this._busy = false;
+        this.#isBusy = false;
     }
 
-async _actionOpenSlots(mode) {
-        if (this._busy) return;
-        // Esperar saves si aún están cargando
-        if (this._savesReady) await this._savesReady;
-        this._openSlotPanel(mode);
+    async #openSlotsForSaving() {
+        if (this.#isBusy) return;
+        await this.#slotLoadingPromise;
+        this.#slotPanel.open('save', this.#buildSlotDataArray());
     }
 
-    _actionQuickSave() {
-        // Ya no hace quick-save ciego — abre el panel de slots para que
-        // el jugador elija dónde guardar.
-        this._actionOpenSlots('save');
+    async #openSlotsForLoading() {
+        if (this.#isBusy) return;
+        await this.#slotLoadingPromise;
+        this.#slotPanel.open('load', this.#buildSlotDataArray());
     }
 
-    async _actionExitDirect() {
-        if (this._busy) return;
-        this._busy = true;
-        await this.engine.saveToSlot('autosave').catch(() => {});
-        this._doExitToMenu();
-        this._busy = false;
+    async #openGallery() {
+        const unlockedEntries = await this.#saveManager.db.gallery
+            ?.orderBy('unlockedAt').toArray() ?? [];
+        this.#galleryPanel.open(unlockedEntries);
     }
 
-    _actionExitConfirm() {
-        this._showModal({
+    #openBacklog() {
+        if (this.#currentState !== MenuSystem.STATES.IN_GAME) return;
+        this.#backlogPanel.open(this.#engine.backlog ?? []);
+    }
+
+    #openAudioPanel() {
+        this.#audioPanel.open(this.#engine.state.audioSettings);
+    }
+
+    async #exitToMainMenuWithAutosave() {
+        if (this.#isBusy) return;
+        this.#isBusy = true;
+        await this.#engine.saveToSlot('autosave').catch(() => {});
+        this.#returnToMainMenu();
+        this.#isBusy = false;
+    }
+
+    async #confirmExitToMainMenu() {
+        const playerConfirmed = await this.#modalPanel.prompt({
             message:      '¿Volver al menú principal?\nEl progreso no guardado se perderá.',
             confirmLabel: 'Salir',
             cancelLabel:  'Cancelar',
-            onConfirm:    () => this._doExitToMenu(),
         });
+        if (playerConfirmed) this.#returnToMainMenu();
     }
 
-    _doExitToMenu() {
-        this.audio.stopBGM(500);
-        this._setState(MenuSystem.STATES.MAIN_MENU);
-        this._savesReady = this._loadSaves();
+    #returnToMainMenu() {
+        this.#audio.stopBGM(500);
+        this.#transitionToState(MenuSystem.STATES.MAIN_MENU);
+        this.#slotLoadingPromise = this.#loadAllSlots();
     }
 
+    // ── Handlers de paneles ────────────────────────────────────────────────
 
+    /** @param {string} slotId */
+    async #handleSaveToSlot(slotId) {
+        const slotDisplayName    = MenuSystem.#SLOT_DISPLAY_NAMES[slotId];
+        const slotAlreadyHasData = this.#cachedSlots[slotId] !== null;
 
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // GALERÍA
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _buildGalleryPanel() {
-        const el = document.createElement('div');
-        el.id = 'dm-gallery';
-        el.className = 'dm-hidden';
-        el.innerHTML = `
-            <div class="dm-gallery__inner">
-                <div class="dm-gallery__header">
-                    <span class="dm-gallery__title">Galería</span>
-                    <button class="dm-gallery__close" id="dm-gallery-close">✕</button>
-                </div>
-                <div class="dm-gallery__grid" id="dm-gallery-grid"></div>
-            </div>
-            <div class="dm-gallery__lightbox dm-hidden" id="dm-gallery-lightbox">
-                <button class="dm-gallery__lb-close" id="dm-gallery-lb-close">✕</button>
-                <button class="dm-gallery__lb-prev" id="dm-gallery-lb-prev">‹</button>
-                <img class="dm-gallery__lb-img" id="dm-gallery-lb-img" src="" alt="">
-                <div class="dm-gallery__lb-caption" id="dm-gallery-lb-caption"></div>
-                <button class="dm-gallery__lb-next" id="dm-gallery-lb-next">›</button>
-            </div>`;
-        document.body.appendChild(el);
-        this._els.galleryPanel = el;
-
-        document.getElementById('dm-gallery-close')
-            ?.addEventListener('click', () => this._closeGallery());
-
-        document.getElementById('dm-gallery-lb-close')
-            ?.addEventListener('click', () => this._closeLightbox());
-
-        document.getElementById('dm-gallery-lb-prev')
-            ?.addEventListener('click', () => this._lbNavigate(-1));
-
-        document.getElementById('dm-gallery-lb-next')
-            ?.addEventListener('click', () => this._lbNavigate(1));
-
-        // Cerrar lightbox con clic en el fondo
-        document.getElementById('dm-gallery-lightbox')
-            ?.addEventListener('click', (e) => {
-                if (e.target.id === 'dm-gallery-lightbox') this._closeLightbox();
+        if (slotAlreadyHasData) {
+            const playerConfirmed = await this.#modalPanel.prompt({
+                message:      `¿Sobrescribir ${slotDisplayName}?`,
+                confirmLabel: 'Guardar',
+                cancelLabel:  'Cancelar',
             });
-    }
-
-    async _openGallery() {
-        await this._renderGallery();
-        this._els.galleryPanel?.classList.remove('dm-hidden');
-    }
-
-    _closeGallery() {
-        this._closeLightbox();
-        this._els.galleryPanel?.classList.add('dm-hidden');
-    }
-
-    async _renderGallery() {
-        const grid = document.getElementById('dm-gallery-grid');
-        if (!grid) return;
-
-        const entries = await this.saveManager.db.gallery
-            ?.orderBy('unlockedAt').toArray() ?? [];
-
-        if (entries.length === 0) {
-            grid.innerHTML = `<div class="dm-gallery__empty">
-                Todavía no hay imágenes desbloqueadas.<br>
-                <span>Continúa jugando para descubrirlas.</span>
-            </div>`;
-            return;
+            if (!playerConfirmed) return;
         }
 
-        this._galleryEntries = entries; // para navegación del lightbox
-
-        grid.innerHTML = entries.map((e, i) => `
-            <button class="dm-gallery__thumb" data-index="${i}" title="${e.title}">
-                <img src="${e.path}.webp" alt="${e.title}"
-                     onerror="this.src='${e.path}.png';this.onerror=null">
-                <span class="dm-gallery__thumb-label">${e.title}</span>
-            </button>
-        `).join('');
-
-        grid.querySelectorAll('.dm-gallery__thumb').forEach(btn => {
-            btn.addEventListener('click', () => {
-                this._openLightbox(parseInt(btn.dataset.index));
-            });
-        });
+        await this.#engine.saveToSlot(slotId);
+        await this.#loadAllSlots();
+        this.#slotPanel.hide();
+        this.#showToast('Partida guardada');
     }
 
-    _openLightbox(index) {
-        const entries = this._galleryEntries ?? [];
-        if (!entries[index]) return;
+    /** @param {string} slotId */
+    async #handleLoadFromSlot(slotId) {
+        const savedState = this.#cachedSlots[slotId];
+        if (!savedState) return;
 
-        this._lbIndex = index;
-        this._updateLightbox();
-        document.getElementById('dm-gallery-lightbox')?.classList.remove('dm-hidden');
-    }
+        this.#slotPanel.hide();
+        this.#isBusy = true;
+        this.#showLoadingOverlay('Cargando partida...');
+        this.#audio.unlock?.();
 
-    _closeLightbox() {
-        document.getElementById('dm-gallery-lightbox')?.classList.add('dm-hidden');
-    }
+        const sceneTarget = savedState.currentFile.replace('.dan', '');
+        const sceneLoaded = await this.#sceneManager.loadOnly(sceneTarget);
 
-    _lbNavigate(dir) {
-        const entries = this._galleryEntries ?? [];
-        this._lbIndex = (this._lbIndex + dir + entries.length) % entries.length;
-        this._updateLightbox();
-    }
-
-    _updateLightbox() {
-        const entry = this._galleryEntries?.[this._lbIndex];
-        if (!entry) return;
-        const img = document.getElementById('dm-gallery-lb-img');
-        const cap = document.getElementById('dm-gallery-lb-caption');
-        if (img) {
-            img.src = `${entry.path}.webp`;
-            img.onerror = () => { img.src = `${entry.path}.png`; img.onerror = null; };
-            img.alt = entry.title;
+        if (sceneLoaded) {
+            await this.#engine.resumeFromState(savedState);
+            await this.#engine.next();
         }
-        if (cap) cap.textContent = entry.title;
+
+        this.#hideLoadingOverlay();
+        this.#transitionToState(MenuSystem.STATES.IN_GAME);
+
+        if (this.#engine.renderer?.fadeIn) {
+            await this.#engine.renderer.fadeIn(400);
+        }
+
+        this.#isBusy = false;
     }
 
-    _buildBacklogPanel() {
-        const el = document.createElement('div');
-        el.id = 'dm-backlog';
-        el.className = 'dm-hidden';
-        el.innerHTML = `
-            <div class="dm-backlog__inner">
-                <div class="dm-backlog__header">
-                    <span class="dm-backlog__title">Historial</span>
-                    <button class="dm-backlog__close" id="dm-backlog-close">✕</button>
-                </div>
-                <div class="dm-backlog__list" id="dm-backlog-list"></div>
-            </div>`;
-        document.body.appendChild(el);
-        this._els.backlogPanel = el;
-        this._els.backlogList  = el.querySelector('#dm-backlog-list');
+    /**
+     * @param {string} slotId
+     * @param {string} displayName
+     */
+    async #handleDeleteSlot(slotId, displayName) {
+        const playerConfirmed = await this.#modalPanel.prompt({
+            message:      `¿Eliminar ${displayName}? Esta acción no se puede deshacer.`,
+            confirmLabel: 'Eliminar',
+            cancelLabel:  'Cancelar',
+        });
+        if (!playerConfirmed) return;
 
-        document.getElementById('dm-backlog-close')
-            ?.addEventListener('click', () => this._closeBacklog());
-
-        // Scroll con rueda también cierra si llega al tope superior
-        el.addEventListener('wheel', (e) => { e.stopPropagation(); }, { passive: true });
+        await this.#saveManager.deleteSlot(slotId);
+        await this.#loadAllSlots();
+        this.#slotPanel.open(this.#slotPanel.currentMode, this.#buildSlotDataArray());
+        this.#showToast(`${displayName} eliminada`);
     }
 
-    _openBacklog() {
-        if (this._state !== MenuSystem.STATES.IN_GAME) return;
-        this._renderBacklog();
-        this._els.backlogPanel?.classList.remove('dm-hidden');
+    /**
+     * @param {'bgm' | 'se' | 'voice'} channel
+     * @param {number}                  volume
+     */
+    #handleVolumeChange(channel, volume) {
+        this.#audio.setVolume(channel, volume);
+
+        const audioSettings = this.#engine.state.audioSettings;
+        if (channel === 'bgm')   audioSettings.bgmVolume   = volume;
+        if (channel === 'se')    audioSettings.sfxVolume   = volume;
+        if (channel === 'voice') audioSettings.voiceVolume = volume;
     }
 
-    _closeBacklog() {
-        this._els.backlogPanel?.classList.add('dm-hidden');
+    // ── Modos de lectura ───────────────────────────────────────────────────
+
+    #toggleAutoMode() {
+        const autoIsNowActive = this.#engine.toggleAuto();
+        this.#staticElements.btnAuto?.classList.toggle('hud-btn--active', autoIsNowActive);
+        this.#staticElements.btnSkip?.classList.remove('hud-btn--active');
     }
 
-    _isBacklogOpen() {
-        return this._els.backlogPanel && !this._els.backlogPanel.classList.contains('dm-hidden');
+    #triggerSkipMode() {
+        const skipButton    = this.#staticElements.btnSkip;
+        const skipIsNowActive = this.#engine.triggerSkip(() => {
+            skipButton?.classList.remove('hud-btn--active');
+        });
+        skipButton?.classList.toggle('hud-btn--active', skipIsNowActive);
+        if (skipIsNowActive) {
+            this.#staticElements.btnAuto?.classList.remove('hud-btn--active');
+        }
     }
 
-    _renderBacklog() {
-        if (!this._els.backlogList) return;
-        const entries = this.engine.backlog ?? [];
+    // ── Tecla Escape ──────────────────────────────────────────────────────
 
-        this._els.backlogList.innerHTML = entries
-            .map(({ speaker, text }) => {
-                if (speaker) {
-                    return `<div class="dm-backlog__entry dm-backlog__entry--dialogue">
-                        <span class="dm-backlog__speaker">${speaker}</span>
-                        <span class="dm-backlog__text">${text}</span>
-                    </div>`;
-                } else {
-                    return `<div class="dm-backlog__entry dm-backlog__entry--narrate">
-                        <span class="dm-backlog__text dm-backlog__text--narrate">${text}</span>
-                    </div>`;
-                }
+    #handleEscapeKey() {
+        const states = MenuSystem.STATES;
+
+        if (this.#galleryPanel.isOpen ?? false) { this.#galleryPanel.hide();  return; }
+        if (this.#backlogPanel.isOpen)          { this.#backlogPanel.hide();  return; }
+        if (this.#currentState === states.MAIN_MENU) return;
+        if (this.#currentState === states.LOADING)   return;
+        if (this.#modalPanel.isOpen)            { this.#modalPanel.hide();    return; }
+
+        const audioIsOpen = !document.getElementById('dm-audio-panel')
+            ?.classList.contains('dm-hidden');
+        if (audioIsOpen) { this.#audioPanel.hide(); return; }
+
+        const slotIsOpen = !document.getElementById('dm-slot-panel')
+            ?.classList.contains('dm-hidden');
+        if (slotIsOpen) { this.#slotPanel.hide(); return; }
+
+        if (this.#currentState === states.PAUSED)  { this.#transitionToState(states.IN_GAME); return; }
+        if (this.#currentState === states.IN_GAME) { this.#transitionToState(states.PAUSED);  return; }
+    }
+
+    // ── HUD ────────────────────────────────────────────────────────────────
+
+    #updateHudSceneInfo() {
+        if (this.#staticElements.hudTitle) {
+            this.#staticElements.hudTitle.textContent = this.#gameTitle;
+        }
+
+        const currentSceneFile  = this.#engine.state.currentFile ?? '';
+        const formattedSceneName = currentSceneFile
+            .replace('.dan', '')
+            .split('/')
+            .map(segment => segment.replace(/_/g, ' ').replace(/\w/g, char => char.toUpperCase()))
+            .join(' · ');
+
+        if (this.#staticElements.hudScene) {
+            this.#staticElements.hudScene.textContent = formattedSceneName;
+        }
+    }
+
+    #startHudClock() {
+        this.#stopHudClock();
+        this.#hudClockInterval = setInterval(() => {
+            if (this.#currentState !== MenuSystem.STATES.IN_GAME) return;
+
+            const accumulatedPlaytime = (this.#engine.state.playTime ?? 0) +
+                Math.floor((Date.now() - (this.#engine._sessionStart ?? Date.now())) / 1000);
+
+            const hours   = Math.floor(accumulatedPlaytime / 3600);
+            const minutes = Math.floor((accumulatedPlaytime % 3600) / 60)
+                .toString().padStart(2, '0');
+            const seconds = (accumulatedPlaytime % 60)
+                .toString().padStart(2, '0');
+
+            const formattedTime = hours > 0
+                ? `${hours}:${minutes}:${seconds}`
+                : `${minutes}:${seconds}`;
+
+            if (this.#staticElements.hudPlaytime) {
+                this.#staticElements.hudPlaytime.textContent = formattedTime;
+            }
+        }, 1000);
+    }
+
+    #stopHudClock() {
+        clearInterval(this.#hudClockInterval);
+        this.#hudClockInterval = null;
+    }
+
+    // ── Slots ──────────────────────────────────────────────────────────────
+
+    async #loadAllSlots() {
+        await Promise.all(
+            MenuSystem.#SLOT_IDS.map(async (slotId) => {
+                this.#cachedSlots[slotId] = await this.#saveManager.load(slotId);
             })
-            .join('');
-
-        // Scroll al final — la última entrada es la más reciente
-        this._els.backlogList.scrollTop = this._els.backlogList.scrollHeight;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // PANEL DE SLOTS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    async _actionDeleteSlot(slotId, slotName) {
-        const ok = await this._confirmModal(
-            `¿Eliminar ${slotName}? Esta acción no se puede deshacer.`,
-            'Eliminar', 'Cancelar'
         );
-        if (!ok) return;
-        await this.saveManager.deleteSlot(slotId);
-        await this._loadSaves();
-        // Re-renderizar con los datos frescos
-        this._renderSlots(this._slotMode);
-        this._toast(`${slotName} eliminada`);
+        this.#refreshMainMenuButtonStates();
     }
 
-    _openSlotPanel(mode) {
-        if (this._els.slotTitle) {
-            this._els.slotTitle.textContent = mode === 'save'
-                ? '— Guardar Partida —'
-                : '— Cargar Partida —';
-        }
-        this._renderSlots(mode);
-        this._els.slotPanel?.classList.remove('dm-hidden');
-    }
-
-    _closeSlotPanel() {
-        this._els.slotPanel?.classList.add('dm-hidden');
-    }
-
-    _renderSlots(mode) {
-        if (!this._els.slotList) return;
-        const SLOTS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
-        const NAMES = {
-            autosave: 'Autoguardado',
-            slot_1:   'Ranura 1',
-            slot_2:   'Ranura 2',
-            slot_3:   'Ranura 3',
-        };
-
-        this._els.slotList.innerHTML = '';
-
-        for (const slotId of SLOTS) {
-            if (mode === 'save' && slotId === 'autosave') continue;
-
-            const data = this._saves[slotId];
-            const item = document.createElement('div');
-            item.className = `dm-slot-item${data ? '' : ' dm-slot-item--empty'}`;
-
-            const date = data?.savedAt
-                ? new Date(data.savedAt).toLocaleDateString('es', {
-                    day: '2-digit', month: 'short', year: 'numeric',
-                    hour: '2-digit', minute: '2-digit' })
-                : 'Vacío';
-
-            // Botón eliminar — solo en slots con datos
-            const deleteBtn = data ? `<button class="dm-slot-delete" title="Eliminar">✕</button>` : '';
-
-            item.innerHTML = `
-                <span class="dm-slot-name">${NAMES[slotId]}</span>
-                <span class="dm-slot-meta">${date}</span>
-                ${deleteBtn}`;
-
-            // Clic en botón eliminar (no propaga al item)
-            item.querySelector('.dm-slot-delete')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this._actionDeleteSlot(slotId, NAMES[slotId]);
-            });
-
-            item.addEventListener('click', () =>
-                this._onSlotClick(mode, slotId, NAMES[slotId], data));
-
-            this._els.slotList.appendChild(item);
-        }
-    }
-
-    async _onSlotClick(mode, slotId, slotName, data) {
-        if (mode === 'save') {
-            if (data) {
-                const ok = await this._confirmModal(
-                    `¿Sobrescribir ${slotName}?`, 'Guardar', 'Cancelar');
-                if (!ok) return;
-            }
-            await this.engine.saveToSlot(slotId);
-            await this._loadSaves();
-            this._closeSlotPanel();
-            this._toast('Partida guardada');
-
-        } else {
-            if (!data) return;
-            this._closeAllPanels();
-            this._busy = true;
-            this._showLoading('Cargando partida...');
-            this.audio.unlock?.();
-
-            const target = data.currentFile.replace('.dan', '');
-            const ok = await this.sceneManager.loadOnly(target);
-            if (ok) {
-                await this.engine.resumeFromState(data);
-                await this.engine.next();
-            }
-
-            this._hideLoading();
-            this._setState(MenuSystem.STATES.IN_GAME);
-            if (this.engine.renderer?.fadeIn) await this.engine.renderer.fadeIn(400);
-            this._busy = false;
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // PANELES SECUNDARIOS
-    // ─────────────────────────────────────────────────────────────────────────
-
-
-    _openAudio() {
-        const s = this.engine.state.audioSettings;
-        if (this._els.sliderBGM)   this._els.sliderBGM.value   = Math.round(s.bgmVolume   * 100);
-        if (this._els.sliderSE)    this._els.sliderSE.value    = Math.round(s.sfxVolume   * 100);
-        if (this._els.sliderVoice) this._els.sliderVoice.value = Math.round(s.voiceVolume * 100);
-        this._els.audioPanel?.classList.remove('dm-hidden');
-    }
-    _closeAudio() {
-        this._els.audioPanel?.classList.add('dm-hidden');
-    }
-
-    _closeAllPanels() {
-        this._closeSlotPanel();
-        this._closeAudio();
-        this._closeModal();
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // ESC
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _handleEsc() {
-        if (!this._els.galleryPanel?.classList.contains('dm-hidden')) { this._closeGallery(); return; }
-        if (this._isBacklogOpen()) { this._closeBacklog(); return; }
-        const S = MenuSystem.STATES;
-        if (this._state === S.MAIN_MENU || this._state === S.LOADING) return;
-
-        if (this._isModalOpen())                                                  { this._closeModal();     return; }
-        if (!this._els.audioPanel?.classList.contains('dm-hidden'))              { this._closeAudio();     return; }
-        if (!this._els.slotPanel?.classList.contains('dm-hidden'))               { this._closeSlotPanel(); return; }
-        if (this._state === S.PAUSED)  { this._setState(S.IN_GAME); return; }
-        if (this._state === S.IN_GAME) { this._setState(S.PAUSED);  return; }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // MODAL
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _showModal({ message, confirmLabel, cancelLabel, onConfirm, onCancel }) {
-        this._els.modalMsg.textContent     = message;
-        this._els.modalConfirm.textContent = confirmLabel;
-        this._els.modalCancel.textContent  = cancelLabel;
-
-        const nc = this._els.modalConfirm.cloneNode(true);
-        const nx = this._els.modalCancel.cloneNode(true);
-        this._els.modalConfirm.replaceWith(nc);
-        this._els.modalCancel.replaceWith(nx);
-        this._els.modalConfirm = nc;
-        this._els.modalCancel  = nx;
-
-        nc.addEventListener('click', () => { this._closeModal(); onConfirm(); });
-        nx.addEventListener('click', () => { this._closeModal(); onCancel?.(); });
-        this._els.modal?.classList.remove('dm-hidden');
-    }
-
-    _confirmModal(message, confirmLabel = 'Confirmar', cancelLabel = 'Cancelar') {
-        return new Promise((resolve) => {
-            this._showModal({
-                message, confirmLabel, cancelLabel,
-                onConfirm: () => resolve(true),
-                onCancel:  () => resolve(false),
-            });
-        });
-    }
-
-    _closeModal() { this._els.modal?.classList.add('dm-hidden'); }
-    _isModalOpen() { return !this._els.modal?.classList.contains('dm-hidden'); }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // LOADING
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _showLoading(msg = 'Cargando...') {
-        if (this._els.loadingMsg) this._els.loadingMsg.textContent = msg;
-        this._els.loadingOverlay?.classList.remove('dm-hidden');
-    }
-    _hideLoading() {
-        this._els.loadingOverlay?.classList.add('dm-hidden');
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // TOAST — notificación flotante en esquina, desaparece sola
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _toast(msg) {
-        if (!this._els.toast) return;
-        this._els.toast.textContent = msg;
-        this._els.toast.classList.remove('dm-hidden');
-        this._els.toast.classList.add('dm-toast--visible');
-        clearTimeout(this._toastTimer);
-        this._toastTimer = setTimeout(() => {
-            this._els.toast.classList.remove('dm-toast--visible');
-            // Esperar la transición CSS antes de ocultar del todo
-            setTimeout(() => this._els.toast.classList.add('dm-hidden'), 300);
-        }, 2500);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // SAVES
-    // ─────────────────────────────────────────────────────────────────────────
-
-    async _loadSaves() {
-        const SLOTS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
-        await Promise.all(SLOTS.map(async (id) => {
-            this._saves[id] = await this.saveManager.load(id);
+    /** @returns {SlotRecord[]} */
+    #buildSlotDataArray() {
+        return MenuSystem.#SLOT_IDS.map(slotId => ({
+            slotId,
+            displayName: MenuSystem.#SLOT_DISPLAY_NAMES[slotId],
+            savedAt:     this.#cachedSlots[slotId]?.savedAt     ?? null,
+            currentFile: this.#cachedSlots[slotId]?.currentFile ?? null,
         }));
-        this._autosave = this._saves['autosave'];
-        this._updateMainMenuButtons();
     }
 
-    _updateMainMenuButtons() {
-        const hasSaves = Object.values(this._saves).some(Boolean);
-        // "Cargar Partida" — activo si hay cualquier save
-        if (this._els.btnLoad)
-            this._els.btnLoad.disabled = !hasSaves;
+    #refreshMainMenuButtonStates() {
+        const anySlotHasData = Object.values(this.#cachedSlots).some(Boolean);
+        if (this.#staticElements.btnLoadGame) {
+            this.#staticElements.btnLoadGame.disabled = !anySlotHasData;
+        }
+    }
+
+    // ── Contenido estático del menú ────────────────────────────────────────
+
+    #populateStaticMenuContent() {
+        if (this.#staticElements.menuTitle) {
+            this.#staticElements.menuTitle.textContent = this.#gameTitle;
+        }
+        if (this.#staticElements.menuSubtitle) {
+            this.#staticElements.menuSubtitle.textContent = this.#gameSubtitle;
+        }
+    }
+
+    // ── Loading overlay ────────────────────────────────────────────────────
+
+    #buildLoadingOverlay() {
+        const overlay = document.createElement('div');
+        overlay.id        = 'dm-loading';
+        overlay.className = 'dm-overlay dm-loading dm-hidden';
+
+        const messageSpan = document.createElement('span');
+        messageSpan.id = 'dm-loading-msg';
+
+        overlay.appendChild(messageSpan);
+        document.body.appendChild(overlay);
+
+        this.#staticElements.loadingOverlay = overlay;
+        this.#staticElements.loadingMessage = messageSpan;
+    }
+
+    /** @param {string} message */
+    #showLoadingOverlay(message) {
+        this.#staticElements.loadingMessage.textContent = message;
+        this.#staticElements.loadingOverlay?.classList.remove('dm-hidden');
+    }
+
+    #hideLoadingOverlay() {
+        this.#staticElements.loadingOverlay?.classList.add('dm-hidden');
+    }
+
+    // ── Toast ──────────────────────────────────────────────────────────────
+
+    #buildToastElement() {
+        const toast = document.createElement('div');
+        toast.id        = 'dm-toast';
+        toast.className = 'dm-toast dm-hidden';
+        document.body.appendChild(toast);
+        this.#staticElements.toastElement = toast;
+    }
+
+    /** @param {string} message */
+    #showToast(message) {
+        const toastElement = this.#staticElements.toastElement;
+        if (!toastElement) return;
+
+        toastElement.textContent = message;
+        toastElement.classList.remove('dm-hidden');
+        toastElement.classList.add('dm-toast--visible');
+
+        clearTimeout(this.#toastTimer);
+        this.#toastTimer = setTimeout(() => {
+            toastElement.classList.remove('dm-toast--visible');
+            setTimeout(() => toastElement.classList.add('dm-hidden'), 300);
+        }, 2500);
     }
 }
