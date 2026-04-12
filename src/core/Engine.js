@@ -1,64 +1,177 @@
 // src/core/Engine.js
 
-import { Character } from './models/Character.js';
+import { Character }  from './models/Character.js';
+import { GameState }  from './State.js';
 
-// Ruta base del deployment — '/' en dev, '/Dramaturge/' en GitHub Pages
-const BASE_URL = import.meta.env.BASE_URL;
+// ─── Constantes ───────────────────────────────────────────────────────────────
 
-import { GameState } from './State.js';
+const DEPLOYMENT_BASE_URL      = import.meta.env.BASE_URL;
+const BACKLOG_MAX_ENTRIES      = 80;
+const AUTOSAVE_DEBOUNCE_MS     = 2500;
+const SKIP_ADVANCE_INTERVAL_MS = 30;
+const AUTO_ADVANCE_DEFAULT_MS  = 1800;
 
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {'left' | 'center' | 'right'} SpriteSlot
+ */
+
+/**
+ * @typedef {Object} BacklogEntry
+ * @property {string|null} speaker - Nombre del personaje o null si es narración
+ * @property {string}      text
+ */
+
+/**
+ * @typedef {Object} ParsedInstruction
+ * @property {string} type - Tipo de instrucción: 'DIALOGUE', 'NARRATE', 'GOTO', etc.
+ * @property {number} line - Línea original en el script .dan
+ */
+
+/**
+ * @typedef {Object} VisualSlotState
+ * @property {string} actorId
+ * @property {string} path
+ */
+
+/**
+ * @callback PuzzleResolver
+ * @param {string} puzzleId
+ * @returns {Promise<boolean>}
+ */
+
+/**
+ * @callback SceneLoader
+ * @param {string}      target
+ * @param {string|null} fadeColor
+ * @returns {Promise<void>}
+ */
+
+// ─── Engine ───────────────────────────────────────────────────────────────────
+
+/**
+ * Núcleo del motor de novela visual.
+ *
+ * Responsabilidades:
+ * - Ejecutar instrucciones parseadas del lenguaje Koedan en secuencia
+ * - Mantener el estado del juego sincronizado con el progreso narrativo
+ * - Gestionar los modos de lectura: normal, automático y skip
+ * - Coordinar renderer, audio y sistema de guardado
+ *
+ * Dependencias externas inyectadas tras instanciar:
+ * - `puzzleResolver` — abre puzzles y devuelve el resultado
+ * - `sceneLoader`    — carga y ejecuta otra escena .dan
+ *
+ * @example
+ * const engine = new Dramaturge(db, renderer, audio, state, saveManager);
+ * engine.puzzleResolver = (id) => puzzleSystem.open(id);
+ * engine.sceneLoader    = (target, fade) => sceneManager.goto(target, fade);
+ * await engine.loadScript(parsedInstructions);
+ * await engine.next();
+ */
 export class Dramaturge {
+
+    // ── Dependencias ───────────────────────────────────────────────────────
+
+    /** @type {import('dexie').Dexie} */
+    #db;
+
+    /** @type {import('../modules/Renderer.js').Renderer} */
+    renderer;
+
+    /** @type {import('../modules/Audio.js').AudioManager} */
+    audio;
+
+    /** @type {GameState} */
+    state;
+
+    /** @type {import('./SaveManager.js').SaveManager|null} */
+    #saveManager;
+
+    // ── Callbacks externos ─────────────────────────────────────────────────
+
+    /** @type {PuzzleResolver|null} */
+    puzzleResolver = null;
+
+    /** @type {SceneLoader|null} */
+    sceneLoader = null;
+
+    // ── Estado de ejecución ────────────────────────────────────────────────
+
+    /** @type {ParsedInstruction[]} */
+    instructions = [];
+
+    /** @type {number} — índice de la próxima instrucción a ejecutar */
+    currentIndex = 0;
+
+    /** @type {boolean} — true mientras el engine espera input del jugador */
+    isBlocked = false;
+
+    /** @type {'dialogue' | 'narrate' | null} — modo de textbox activo */
+    #lastRenderedTextMode = null;
+
+    // ── Personajes en escena ───────────────────────────────────────────────
+
+    /** @type {Map<string, Character>} — actores cargados en memoria por id */
+    #loadedCharacters = new Map();
+
+    /** @type {Record<SpriteSlot, string|null>} — actorId ocupando cada slot */
+    #occupiedSlots = { left: null, center: null, right: null };
+
+    // ── Backlog ────────────────────────────────────────────────────────────
+
+    /** @type {BacklogEntry[]} — historial de diálogos y narraciones, máx 80 */
+    backlog = [];
+
+    // ── Modos de lectura ───────────────────────────────────────────────────
+
+    /** @type {boolean} */
+    autoMode = false;
+
+    /** @type {boolean} */
+    skipMode = false;
+
+    /** @type {number} — ms entre avances en modo automático */
+    autoAdvanceDelayMs = AUTO_ADVANCE_DEFAULT_MS;
+
     /**
-     * @param {object}      db           - Instancia de Dexie
-     * @param {Renderer}  renderer     - Módulo de render
-     * @param {AudioManager}     audioManager - Módulo de audio
-     * @param {GameState}   state        - Estado del juego (crea uno nuevo si no se pasa)
-     * @param {SaveManager} saveManager  - Gestor de guardado (autosave desactivado si null)
+     * Índice más alto completado por el jugador en esta partida.
+     * El modo skip solo avanza hasta este punto — nunca más allá.
+     * @type {number}
      */
-    constructor(db, renderer, audioManager, state = null, saveManager = null) {
-        this.db          = db;
-        this.renderer    = renderer;
-        this.audio       = audioManager;
-        this.state       = state       ?? new GameState();
-        this.saveManager = saveManager ?? null;
+    highWaterMark = 0;
 
-        this.activePawns = new Map();
-        this.slots       = { left: null, center: null, right: null };
+    // ── Guards y timers ────────────────────────────────────────────────────
 
-        this.instructions = [];
-        this.currentIndex = 0;
-        this.isBlocked    = false;
-        this._lastTextMode = null; // 'narrate' | 'dialogue' | null — para detectar cambios de modo
+    /** @type {boolean} — previene re-entrancia en next() */
+    #isAdvancing = false;
 
-        // ── Modos de lectura ──────────────────────────────────────────────
-        // Auto: avanza solo cuando el typewriter termina (con delay)
-        // Skip: avanza instantáneamente, solo en líneas ya vistas
-        this.autoMode      = false;
-        this.skipMode      = false;
-        this.autoDelay     = 1800;  // ms entre líneas en modo auto (configurable)
-        this._autoTimer    = null;
-        // highWaterMark: índice más alto que el jugador ha completado.
-        // Suficiente para skip en historias lineales con finales por flags/inventario.
-        // No necesita ser un Set — ahorra memoria y escrituras en DB.
-        this.highWaterMark  = 0;
-        this._nextRunning   = false; // guard de re-entrancia para next()
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    #readingModeTimer = null;
 
-        // ── Backlog ───────────────────────────────────────────────────────
-        // Array de { speaker: string|null, text: string } — últimas 80 entradas.
-        // speaker es null para narraciones.
-        this.backlog = [];
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    #autosaveTimer = null;
 
-        // Callbacks externos — se inyectan después de instanciar el Engine.
-        //
-        // Firma: (puzzleId: string) => Promise<boolean>
-        // Inyectar: engine.puzzleResolver = (id) => puzzleSystem.open(id)
-        this.puzzleResolver = null;
+    /** @type {Function|null} — callback cuando el skip para automáticamente */
+    #onSkipStop = null;
 
-        // Firma: (target: string) => Promise<void>
-        // Inyectar: engine.sceneLoader = (t) => sceneManager.goto(t)
-        this.sceneLoader = null;
+    /** @type {number} — timestamp de inicio de sesión para calcular playTime */
+    #sessionStartTimestamp = Date.now();
 
-        this._sessionStart = Date.now();
+    /**
+     * @param {import('dexie').Dexie}                          db
+     * @param {import('../modules/Renderer.js').Renderer}      renderer
+     * @param {import('../modules/Audio.js').AudioManager}     audio
+     * @param {GameState}                                      state
+     * @param {import('./SaveManager.js').SaveManager|null}    saveManager
+     */
+    constructor(db, renderer, audio, state = null, saveManager = null) {
+        this.#db          = db;
+        this.renderer     = renderer;
+        this.audio        = audio;
+        this.state        = state       ?? new GameState();
+        this.#saveManager = saveManager ?? null;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -66,104 +179,25 @@ export class Dramaturge {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Resetea el engine completamente para una partida nueva.
-     * Limpia: state narrativo, pawns, backlog, renderer visual, timers.
-     * Conserva: preferencias de audio (viven en state.audioSettings).
+     * Carga un array de instrucciones parseadas y reinicia el cursor de ejecución.
+     * @param {ParsedInstruction[]} parsedInstructions
      */
-    reset() {
-        // Estado narrativo
-        this.state.reset();
-        this.highWaterMark  = 0;
-        this.currentIndex   = 0;
-        this.instructions   = [];
-        this._lastTextMode  = null;
-        this._nextRunning   = false;
-
-        // Modos de lectura
-        this.autoMode = false;
-        this.skipMode = false;
-        clearTimeout(this._autoTimer);
-        this.renderer._instantText = false;
-        this._skipOnStop = null;
-
-        // Personajes instanciados
-        this.activePawns.clear();
-
-        // Backlog de la sesión
-        this.backlog = [];
-
-        // Renderer: limpiar escena visual
-        this.renderer.clearScene?.();
-
-        console.log('[Engine] Reset completo. Partida nueva.');
-    }
-
     async loadScript(parsedInstructions) {
         this.instructions = parsedInstructions;
         this.currentIndex = 0;
         console.log('[Engine] Script cargado. Instrucciones:', this.instructions.length);
     }
 
-    async resumeFromState(loadedState) {
-        this.state        = loadedState;
-        this.currentIndex = loadedState.currentIndex;
-        // Restaurar hasta dónde llegó el jugador (para skip)
-        this.highWaterMark = loadedState.highWaterMark ?? 0;
-
-        // ── Restaurar audio ───────────────────────────────────────────────
-        const { bgmVolume, sfxVolume, voiceVolume } = loadedState.audioSettings;
-        this.audio.setVolume('bgm',   bgmVolume);
-        this.audio.setVolume('se',    sfxVolume);
-        this.audio.setVolume('voice', voiceVolume);
-
-        // ── Restaurar estado visual (fondo + sprites) ─────────────────────
-        // Orden garantizado: fondo → sprites → modo de textbox
-        const vs = loadedState.visualState ?? {};
-
-        // 1. Fondo
-        if (vs.bg) {
-            await this.renderer.changeBackground(vs.bg, 'none');
-        }
-
-        // 2. Sprites (cargar pawn si no está activo y renderizar en su slot)
-        if (vs.sprites) {
-            for (const [slot, { actorId, path }] of Object.entries(vs.sprites)) {
-                if (!this.activePawns.has(actorId)) {
-                    const data = await this.db.characters.get(actorId);
-                    if (data) {
-                        const { Character } = await import('./models/Character.js');
-                        this.activePawns.set(actorId, new Character(data));
-                    }
-                }
-                this.slots[slot] = actorId;
-                await this.renderer.renderSprite(actorId, path, slot, 'none');
-            }
-        }
-
-        // 3. BGM activo al momento del guardado
-        if (vs.bgm?.track) {
-            await this.audio.playBGM(vs.bgm.track, vs.bgm.vol ?? 0.5);
-        }
-
-        // 4. Modo de textbox
-        if (vs.mode === 'narrate') {
-            this.renderer._setNarrationMode?.(true);
-            this._lastTextMode = 'narrate';
-        } else if (vs.mode === 'dialogue') {
-            this.renderer._setNarrationMode?.(false);
-            this._lastTextMode = 'dialogue';
-        }
-
-        console.log(`[Engine] Reanudando desde índice ${this.currentIndex}. Visual restaurado.`);
-    }
-
-    // next() público — punto de entrada para input del usuario.
-    // Guard de re-entrancia: si ya está corriendo, el clic extra se descarta.
-    // Las llamadas internas del engine usan _nextInternal() directamente.
+    /**
+     * Avanza el script un paso. Punto de entrada para todo input del jugador.
+     *
+     * Si el typewriter está activo: lo completa instantáneamente.
+     * Si el engine está bloqueado esperando input: no hace nada.
+     * Guard de re-entrancia: descarta llamadas mientras ya está avanzando.
+     */
     async next() {
-        if (this._nextRunning) return;
+        if (this.#isAdvancing) return;
 
-        // Si hay texto activo: skip o flash de feedback
         if (this.isBlocked) {
             if (this.renderer._skipLocked) {
                 this.renderer.flashTextBox?.();
@@ -174,514 +208,685 @@ export class Dramaturge {
             return;
         }
 
-        this._nextRunning = true;
+        this.#isAdvancing = true;
         try {
-            await this._nextInternal();
+            await this.#advance();
         } finally {
-            this._nextRunning = false;
+            this.#isAdvancing = false;
         }
     }
 
-    // _nextInternal() — avance real del script.
-    // Se llama recursivamente desde execute() para instrucciones no-bloqueantes.
-    async _nextInternal() {
+    /**
+     * Restaura el engine desde un GameState guardado.
+     * Reconstruye el estado visual (fondo, sprites, modo) y de audio.
+     * @param {GameState} savedState
+     */
+    async resumeFromState(savedState) {
+        this.state         = savedState;
+        this.currentIndex  = savedState.currentIndex;
+        this.highWaterMark = savedState.highWaterMark ?? 0;
 
-        if (this.currentIndex >= this.instructions.length) {
-            console.log('[Engine] Fin del script.');
-            return;
-        }
+        this.#restoreAudioVolumes(savedState.audioSettings);
+        await this.#restoreVisualState(savedState.visualState ?? {});
 
-        const inst = this.instructions[this.currentIndex];
-        this.currentIndex++;
-
-        // Skip mode: si esta instrucción ya fue vista, el typewriter será instantáneo
-        // (renderer._instantText = true). _syncStateAndSave lo relanzará automáticamente.
-        if (this.skipMode && (this.currentIndex - 1) <= this.highWaterMark) {
-            const isText = inst.type === 'DIALOGUE' || inst.type === 'NARRATE';
-            if (isText) this.renderer._instantText = true;
-        }
-
-        await this.execute(inst);
+        console.log(`[Engine] Reanudando desde índice ${this.currentIndex}. Visual restaurado.`);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // DESPACHADOR CENTRAL
-    // ─────────────────────────────────────────────────────────────────────────
+    /**
+     * Resetea el engine completamente para iniciar una partida nueva.
+     * Preserva las preferencias de audio del jugador.
+     */
+    reset() {
+        this.state.reset();
+        this.instructions          = [];
+        this.currentIndex          = 0;
+        this.highWaterMark         = 0;
+        this.isBlocked             = false;
+        this.#lastRenderedTextMode = null;
+        this.#isAdvancing          = false;
+        this.autoMode              = false;
+        this.skipMode              = false;
+        this.#onSkipStop           = null;
+        this.backlog               = [];
 
+        clearTimeout(this.#readingModeTimer);
+        this.renderer._instantText = false;
+        this.#loadedCharacters.clear();
+        this.#occupiedSlots = { left: null, center: null, right: null };
+        this.renderer.clearScene?.();
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // DESPACHADOR CENTRAL
-    // ─────────────────────────────────────────────────────────────────────────
-
-    async execute(inst) {
-        switch (inst.type) {
-
-            // ── Personajes ────────────────────────────────────────────────────
-
-            case 'PAWN_LOAD': {
-                for (const id of inst.names) {
-                    if (this.activePawns.has(id)) continue;
-                    const data = await this.db.characters.get(id);
-                    if (data) {
-                        this.activePawns.set(id, new Character(data));
-                        console.log(`[Engine] Pawn "${id}" instanciado.`);
-                    } else {
-                        console.error(`[Engine] ERROR: personaje "${id}" no existe en la DB.`);
-                    }
-                }
-                await this._nextInternal();
-                break;
-            }
-
-            case 'SPRITE_SHOW': {
-                const pawn = this.activePawns.get(inst.actor);
-                if (!pawn) {
-                    console.error(`[Engine] SPRITE_SHOW: pawn "${inst.actor}" no cargado.`);
-                    break;
-                }
-                const path = `${BASE_URL}${pawn.getSprite(inst.pose).replace(/^\//, '')}`;
-                this._clearActorFromSlots(inst.actor);
-                this.slots[inst.slot] = inst.actor;
-                await this.renderer.renderSprite(inst.actor, path, inst.slot, inst.effect);
-                // Persistir sprite activo para restaurar al cargar
-                this.state.visualState.sprites[inst.slot] = { actorId: inst.actor, path };
-                await this._nextInternal();
-                break;
-            }
-
-            case 'SPRITE_HIDE': {
-                const slot = this._getActorSlot(inst.actor);
-                if (slot) {
-                    await this.renderer.hideSprite(inst.actor, slot, inst.effect);
-                    this.slots[slot] = null;
-                    delete this.state.visualState.sprites[slot]; // ← limpiar del state
-                }
-                await this._nextInternal();
-                break;
-            }
-
-            // ── Escena y audio ─────────────────────────────────────────────────
-
-            case 'BG_CHANGE': {
-                await this.renderer.changeBackground(inst.target, inst.effect, inst.time);
-                this.state.visualState.bg = inst.target; // ← persistir fondo activo
-                await this._nextInternal();
-                break;
-            }
-
-            case 'AUDIO': {
-                if (inst.audioType === 'bgm') {
-                    const bgmVolume = parseFloat(inst.vol ?? 0.5);
-                    this.audio.playBGM(inst.param, bgmVolume);
-                    this.state.visualState.bgm = { track: inst.param, vol: bgmVolume };
-                } else if (inst.audioType === 'se') {
-                    this.audio.playSE(inst.param, parseFloat(inst.vol ?? 0.8));
-                }
-                await this._nextInternal();
-                break;
-            }
-
-            // ── Diálogo y narración ────────────────────────────────────────────
-
-            case 'DIALOGUE': {
-                const pawn = this.activePawns.get(inst.actor);
-
-                // Transición de modo si veníamos de narración
-                // modeTransition bloquea con overlay blanco mientras el modo cambia
-                if (this._lastTextMode === 'narrate') {
-                    await this.renderer.modeTransition(false);
-                }
-                this._lastTextMode = 'dialogue';
-                this.state.visualState.mode = 'dialogue';
-
-                if (inst.pose && pawn) {
-                    const posePath  = `${BASE_URL}${pawn.getSprite(inst.pose).replace(/^\//, '')}`;
-                    const actorSlot = this._getActorSlot(inst.actor);
-                    if (actorSlot) this.renderer.updateSprite(inst.actor, posePath, actorSlot);
-                }
-
-                if (inst.vo && pawn) {
-                    this.audio.playVoice(`${pawn.voicePrefix}${inst.vo}.mp3`);
-                }
-
-                this.isBlocked    = true;
-                const speakerName = pawn ? pawn.name : inst.actor;
-
-                // Añadir al backlog (máx 80 entradas — FIFO)
-                this.backlog.push({ speaker: speakerName, text: inst.text });
-                if (this.backlog.length > 80) this.backlog.shift();
-
-                await this.renderer.typewriter(speakerName, inst.text, () => {
-                    this.isBlocked = false;
-                    this._syncStateAndSave();
-                });
-                break;
-            }
-
-            case 'NARRATE': {
-                // Transición de modo si veníamos de diálogo normal
-                if (this._lastTextMode === 'dialogue') {
-                    await this.renderer.modeTransition(true);
-                }
-                this.state.visualState.mode = 'narrate';
-
-                this.isBlocked = true;
-
-                // Añadir al backlog
-                this.backlog.push({ speaker: null, text: inst.text });
-                if (this.backlog.length > 80) this.backlog.shift();
-
-                await this.renderer.typewriter(null, inst.text, () => {
-                    this.isBlocked = false;
-                    this._syncStateAndSave();
-                });
-                break;
-            }
-
-            // ── Control de flujo ───────────────────────────────────────────────
-
-            case 'WAIT': {
-                // En skip mode no esperamos — el jugador ya vio esta escena
-                if (!this.skipMode) {
-                    const ms = this._parseDuration(inst.duration);
-                    this.isBlocked = true;
-                    await new Promise(resolve => setTimeout(resolve, ms));
-                    this.isBlocked = false;
-                }
-                await this._nextInternal();
-                break;
-            }
-
-            case 'PUZZLE': {
-                this.isBlocked = true;
-
-                let passed = false;
-                if (this.puzzleResolver) {
-                    passed = await this.puzzleResolver(inst.puzzleId);
-                } else {
-                    console.warn(`[Engine] Puzzle "${inst.puzzleId}": no hay puzzleResolver. Asumiendo fallo.`);
-                }
-
-                // Actualizar contadores en el state
-                this.state.setFlag(`${inst.puzzleId}_result`, String(passed));
-                const solved = this.state.getFlag('puzzles_solved', 0) ?? 0;
-                const failed = this.state.getFlag('puzzles_failed', 0) ?? 0;
-                if (passed) {
-                    this.state.setFlag('puzzles_solved', String(Number(solved) + 1));
-                } else {
-                    this.state.setFlag('puzzles_failed', String(Number(failed) + 1));
-                }
-
-                console.log(`[Engine] Puzzle "${inst.puzzleId}" → ${passed ? 'PASS' : 'FAIL'}`);
-
-                // Mostrar resultado como narración — desbloquea al hacer clic
-                const resultText = passed ? inst.passText : inst.failText;
-                // El resultado del puzzle usa modo narrador
-                this.state.visualState.mode = 'narrate';
-
-                await this.renderer.typewriter(null, resultText, () => {
-                    this.isBlocked = false;
-                    this._syncStateAndSave();
-                });
-                break;
-            }
-
-            case 'GOTO': {
-                this._syncState();
-
-                if (!this.sceneLoader) {
-                    this.state.currentFile = `${inst.target}.dan`;
-                    console.log(`[Engine] GOTO → "${inst.target}.dan". Sin SceneManager: detenido.`);
-                    break;
-                }
-
-                if (inst.transition && this.renderer?.sceneTransition) {
-                    // Fase 1: fade IN (oscurece la pantalla, ~480ms)
-                    // Cargamos la escena mientras la pantalla está oscura/blanca
-                    // para que el jugador nunca vea el swap de assets.
-                    const halfMs = 480;
-                    this.renderer.sceneTransition(inst.transition, halfMs); // no await — corre en paralelo
-                    await new Promise(r => setTimeout(r, halfMs));          // esperar que tape la pantalla
-                    await this.sceneLoader(inst.target);                    // cargar nueva escena
-                    // Fase 2: el fade OUT lo completa sceneTransition internamente
-                } else {
-                    await this.sceneLoader(inst.target);
-                }
-                break;
-            }
-
-            // ── Estado ─────────────────────────────────────────────────────────
-
-            case 'SET_FLAG': {
-                this.state.setFlag(inst.key, inst.value);
-                console.log(`[Engine] Flag "${inst.key}" = ${inst.value}`);
-                await this._nextInternal();
-                break;
-            }
-
-            case 'INVENTORY_ADD': {
-                this.state.addItem(inst.item);
-                console.log(`[Engine] Inventario: añadido "${inst.item}".`);
-                await this._nextInternal();
-                break;
-            }
-
-            case 'INVENTORY_REMOVE': {
-                this.state.removeItem(inst.item);
-                console.log(`[Engine] Inventario: eliminado "${inst.item}".`);
-                await this._nextInternal();
-                break;
-            }
-
-            case 'UNLOCK': {
-                // Meta-progreso — no vive en GameState sino en db.gallery directamente.
-                // Sobrevive a Nueva Partida y a borrar saves.
-                const existing = await this.db.gallery?.get(inst.cgId);
-                if (!existing) {
-                    const path = `${BASE_URL}assets/cg/${inst.cgId}`;
-                    await this.db.gallery?.put({
-                        id:          inst.cgId,
-                        title:       inst.title ?? inst.cgId,
-                        path,
-                        unlockedAt:  Date.now(),
-                    });
-                    console.log(`[Engine] CG desbloqueado: "${inst.cgId}"`);
-                }
-                await this._nextInternal();
-                break;
-            }
-
-            // ── Condicionales ──────────────────────────────────────────────────────
-
-            case 'COND_JUMP': {
-                // Evaluar la condición — si es FALSA, saltar a targetIndex
-                const passes = this._evalCondition(inst.condition);
-                if (!passes) {
-                    this.currentIndex = inst.targetIndex;
-                }
-                await this._nextInternal();
-                break;
-            }
-
-            case 'JUMP': {
-                // Salto incondicional (generado por el bloque else)
-                this.currentIndex = inst.targetIndex;
-                await this._nextInternal();
-                break;
-            }
-
-            default: {
-                console.warn(`[Engine] Instrucción no reconocida: "${inst.type}". Saltando.`);
-                await this._nextInternal();
-            }
-        }
+        console.log('[Engine] Reset completo. Partida nueva.');
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MODOS DE LECTURA
-    // ─────────────────────────────────────────────────────────────────────────
-
-    toggleAuto() {
+    /**
+     * Activa o desactiva el modo automático.
+     * Mutuamente excluyente con skipMode.
+     * @returns {boolean} — estado resultante del modo auto
+     */
+    toggleAutoMode() {
         this.autoMode = !this.autoMode;
-        this.skipMode = false; // mutuamente excluyentes
-        if (!this.autoMode) clearTimeout(this._autoTimer);
-        console.log(`[Engine] Auto: ${this.autoMode ? 'ON' : 'OFF'}`);
+        this.skipMode = false;
+        if (!this.autoMode) clearTimeout(this.#readingModeTimer);
         return this.autoMode;
     }
 
     /**
-     * Inicia el skip: avanza instantáneamente hasta el primer texto no visto.
-     * Se detiene solo cuando currentIndex > highWaterMark o llega al fin.
-     * Si skip ya está activo, lo cancela (permite abortar con un segundo toque).
+     * Inicia el modo skip si hay progreso previo, o lo cancela si ya estaba activo.
+     * El skip avanza instantáneamente hasta el primer contenido no visto.
      *
-     * @param {Function} [onStop] - Callback cuando el skip para (botón → off)
+     * @param {Function} [onStop] — llamado cuando el skip para (por límite o cancelación)
+     * @returns {boolean} — true si el skip arrancó, false si se canceló o no hay historial
      */
-    triggerSkip(onStop) {
+    triggerSkipMode(onStop) {
         if (this.skipMode) {
-            // Segundo toque — cancelar skip en curso
-            this.skipMode = false;
-            clearTimeout(this._autoTimer);
-            this.renderer._instantText = false;
+            this.#cancelSkipMode();
             onStop?.();
             return false;
         }
 
         if (this.highWaterMark === 0) {
-            // Sin historial — no hay nada que skipear
             onStop?.();
             return false;
         }
 
-        this.skipMode  = true;
-        this.autoMode  = false;
-        this._skipOnStop = onStop; // guardado para cuando el skip para solo
+        this.skipMode    = true;
+        this.autoMode    = false;
+        this.#onSkipStop = onStop;
 
         if (!this.isBlocked) this.next();
         return true;
     }
 
-    /** Llamado internamente cuando el skip llega al final de lo ya visto */
-    _stopSkip() {
-        if (!this.skipMode) return;
-        this.skipMode = false;
-        this.renderer._instantText = false;
-        clearTimeout(this._autoTimer);
-        this._skipOnStop?.();
-        this._skipOnStop = null;
-    }
-
-    stopModes() {
+    /**
+     * Detiene todos los modos de lectura activos y fuerza un autosave inmediato.
+     * Llamar al abrir el menú de pausa.
+     */
+    stopAllReadingModes() {
         this.autoMode = false;
         this.skipMode = false;
-        clearTimeout(this._autoTimer);
-        // Forzar flush del autosave pendiente al detener modos
-        clearTimeout(this._autosaveTimer);
-        if (this.saveManager && this.state) {
-            this.saveManager.save(this.state, 'autosave')
-                .catch(err => console.error('[Engine] Autosave flush falló:', err));
+        clearTimeout(this.#readingModeTimer);
+        clearTimeout(this.#autosaveTimer);
+
+        if (this.#saveManager && this.state) {
+            this.#saveManager.save(this.state, 'autosave')
+                .catch(err => console.error('[Engine] Autosave urgente falló:', err));
+        }
+    }
+
+    // ── Save / Load ────────────────────────────────────────────────────────
+
+    /** @param {string} slotId */
+    async saveToSlot(slotId = 'slot_1') {
+        if (!this.#saveManager) {
+            console.warn('[Engine] saveToSlot: no hay SaveManager.');
+            return;
+        }
+        this.#syncStateSnapshot();
+        await this.#saveManager.save(this.state, slotId);
+    }
+
+    /** @param {string} slotId */
+    async loadFromSlot(slotId = 'slot_1') {
+        if (!this.#saveManager) return;
+        const savedState = await this.#saveManager.load(slotId);
+        if (savedState) await this.resumeFromState(savedState);
+    }
+
+    exportSaveToFile() {
+        if (!this.#saveManager) return;
+        this.#syncStateSnapshot();
+        this.#saveManager.exportToFile(this.state);
+    }
+
+    async importSaveFromFile() {
+        if (!this.#saveManager) return;
+        const importedState = await this.#saveManager.importFromFile();
+        if (importedState) await this.resumeFromState(importedState);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DESPACHADOR DE INSTRUCCIONES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Ejecuta una instrucción Koedan y avanza automáticamente si no bloquea.
+     * Cada case es responsable de llamar `#advance()` o bloquear el engine.
+     * @param {ParsedInstruction} instruction
+     */
+    async #dispatch(instruction) {
+        switch (instruction.type) {
+
+            // ── Personajes ─────────────────────────────────────────────────
+
+            case 'PAWN_LOAD': {
+                await this.#loadCharactersIntoMemory(instruction.names);
+                await this.#advance();
+                break;
+            }
+
+            case 'SPRITE_SHOW': {
+                await this.#showCharacterSprite(instruction);
+                await this.#advance();
+                break;
+            }
+
+            case 'SPRITE_HIDE': {
+                await this.#hideCharacterSprite(instruction);
+                await this.#advance();
+                break;
+            }
+
+            // ── Escena y audio ─────────────────────────────────────────────
+
+            case 'BG_CHANGE': {
+                await this.renderer.changeBackground(instruction.target, instruction.effect, instruction.time);
+                this.state.visualState.bg = instruction.target;
+                await this.#advance();
+                break;
+            }
+
+            case 'AUDIO': {
+                await this.#handleAudioInstruction(instruction);
+                await this.#advance();
+                break;
+            }
+
+            // ── Diálogo y narración ────────────────────────────────────────
+
+            case 'DIALOGUE': {
+                await this.#renderDialogueLine(instruction);
+                break;
+            }
+
+            case 'NARRATE': {
+                await this.#renderNarrationLine(instruction);
+                break;
+            }
+
+            // ── Control de flujo ───────────────────────────────────────────
+
+            case 'WAIT': {
+                await this.#waitIfNotSkipping(instruction.duration);
+                await this.#advance();
+                break;
+            }
+
+            case 'PUZZLE': {
+                await this.#openAndResolvePuzzle(instruction);
+                break;
+            }
+
+            case 'GOTO': {
+                await this.#navigateToScene(instruction);
+                break;
+            }
+
+            // ── Efectos de pantalla ────────────────────────────────────────
+
+            case 'FX_SHAKE': {
+                await this.renderer.fxShake(this.#parseDurationToMs(instruction.duration));
+                await this.#advance();
+                break;
+            }
+
+            case 'FX_FLASH': {
+                await this.renderer.fxFlash(instruction.color, this.#parseDurationToMs(instruction.duration));
+                await this.#advance();
+                break;
+            }
+
+            case 'FX_VIGNETTE': {
+                this.renderer.fxVignette(instruction.state === 'on');
+                await this.#advance();
+                break;
+            }
+
+            // ── Estado del juego ───────────────────────────────────────────
+
+            case 'SET_FLAG': {
+                this.state.setFlag(instruction.key, instruction.value);
+                await this.#advance();
+                break;
+            }
+
+            case 'INVENTORY_ADD': {
+                this.state.addItem(instruction.item);
+                await this.#advance();
+                break;
+            }
+
+            case 'INVENTORY_REMOVE': {
+                this.state.removeItem(instruction.item);
+                await this.#advance();
+                break;
+            }
+
+            case 'UNLOCK': {
+                await this.#unlockGalleryCg(instruction);
+                await this.#advance();
+                break;
+            }
+
+            // ── Condicionales ──────────────────────────────────────────────
+
+            case 'COND_JUMP': {
+                const conditionPasses = this.#evaluateCondition(instruction.condition);
+                if (!conditionPasses) this.currentIndex = instruction.targetIndex;
+                await this.#advance();
+                break;
+            }
+
+            case 'JUMP': {
+                this.currentIndex = instruction.targetIndex;
+                await this.#advance();
+                break;
+            }
+
+            default: {
+                console.warn(`[Engine] Instrucción desconocida: "${instruction.type}". Saltando.`);
+                await this.#advance();
+            }
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SAVE / LOAD
+    // AVANCE INTERNO
     // ─────────────────────────────────────────────────────────────────────────
 
-    async saveToSlot(slotId = 'slot_1') {
-        if (!this.saveManager) { console.warn('[Engine] No hay SaveManager.'); return; }
-        this._syncState();
-        await this.saveManager.save(this.state, slotId);
+    async #advance() {
+        if (this.currentIndex >= this.instructions.length) {
+            console.log('[Engine] Fin del script.');
+            return;
+        }
+
+        const currentInstruction = this.instructions[this.currentIndex];
+        this.currentIndex++;
+
+        this.#activateInstantTextIfSkipping(currentInstruction);
+        await this.#dispatch(currentInstruction);
     }
 
-    async loadFromSlot(slotId = 'slot_1') {
-        if (!this.saveManager) return;
-        const loaded = await this.saveManager.load(slotId);
-        if (loaded) await this.resumeFromState(loaded);
-    }
+    /** @param {ParsedInstruction} instruction */
+    #activateInstantTextIfSkipping(instruction) {
+        const isTextInstruction = instruction.type === 'DIALOGUE' || instruction.type === 'NARRATE';
+        const isAlreadySeen     = (this.currentIndex - 1) <= this.highWaterMark;
 
-    exportSave() {
-        if (!this.saveManager) return;
-        this._syncState();
-        this.saveManager.exportToFile(this.state);
-    }
-
-    async importSave() {
-        if (!this.saveManager) return;
-        const loaded = await this.saveManager.importFromFile();
-        if (loaded) await this.resumeFromState(loaded);
+        if (this.skipMode && isTextInstruction && isAlreadySeen) {
+            this.renderer._instantText = true;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // HELPERS PRIVADOS
+    // HANDLERS DE INSTRUCCIONES
     // ─────────────────────────────────────────────────────────────────────────
+
+    /** @param {string[]} characterIds */
+    async #loadCharactersIntoMemory(characterIds) {
+        for (const characterId of characterIds) {
+            if (this.#loadedCharacters.has(characterId)) continue;
+            const characterData = await this.#db.characters.get(characterId);
+            if (characterData) {
+                this.#loadedCharacters.set(characterId, new Character(characterData));
+                console.log(`[Engine] Personaje "${characterId}" cargado.`);
+            } else {
+                console.error(`[Engine] Personaje "${characterId}" no encontrado en DB.`);
+            }
+        }
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #showCharacterSprite(instruction) {
+        const character = this.#loadedCharacters.get(instruction.actor);
+        if (!character) {
+            console.error(`[Engine] SPRITE_SHOW: "${instruction.actor}" no está cargado.`);
+            return;
+        }
+        const spritePath = this.#buildAssetUrl(character.getSprite(instruction.pose));
+        this.#removeCharacterFromOccupiedSlots(instruction.actor);
+        this.#occupiedSlots[instruction.slot] = instruction.actor;
+        await this.renderer.renderSprite(instruction.actor, spritePath, instruction.slot, instruction.effect);
+        this.state.visualState.sprites[instruction.slot] = { actorId: instruction.actor, path: spritePath };
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #hideCharacterSprite(instruction) {
+        const occupiedSlot = this.#findSlotOccupiedByCharacter(instruction.actor);
+        if (!occupiedSlot) return;
+        await this.renderer.hideSprite(instruction.actor, occupiedSlot, instruction.effect);
+        this.#occupiedSlots[occupiedSlot] = null;
+        delete this.state.visualState.sprites[occupiedSlot];
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #handleAudioInstruction(instruction) {
+        if (instruction.audioType === 'bgm') {
+            const bgmVolume = parseFloat(instruction.vol ?? 0.5);
+            this.audio.playBGM(instruction.param, bgmVolume);
+            this.state.visualState.bgm = { track: instruction.param, vol: bgmVolume };
+        } else if (instruction.audioType === 'se') {
+            this.audio.playSE(instruction.param, parseFloat(instruction.vol ?? 0.8));
+        }
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #renderDialogueLine(instruction) {
+        const character = this.#loadedCharacters.get(instruction.actor);
+
+        if (this.#lastRenderedTextMode === 'narrate') {
+            await this.renderer.modeTransition(false);
+        }
+        this.#lastRenderedTextMode  = 'dialogue';
+        this.state.visualState.mode = 'dialogue';
+
+        if (instruction.pose && character) {
+            const posePath   = this.#buildAssetUrl(character.getSprite(instruction.pose));
+            const activeSlot = this.#findSlotOccupiedByCharacter(instruction.actor);
+            if (activeSlot) this.renderer.updateSprite(instruction.actor, posePath, activeSlot);
+        }
+
+        if (instruction.vo && character) {
+            this.audio.playVoice(`${character.voicePrefix}${instruction.vo}.mp3`);
+        }
+
+        const speakerName = character ? character.name : instruction.actor;
+        this.#pushToBacklog({ speaker: speakerName, text: instruction.text });
+
+        this.isBlocked = true;
+        await this.renderer.typewriter(speakerName, instruction.text, () => {
+            this.isBlocked = false;
+            this.#syncStateAndScheduleAutosave();
+        });
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #renderNarrationLine(instruction) {
+        if (this.#lastRenderedTextMode === 'dialogue') {
+            await this.renderer.modeTransition(true);
+        }
+        this.state.visualState.mode = 'narrate';
+        this.#pushToBacklog({ speaker: null, text: instruction.text });
+
+        this.isBlocked = true;
+        await this.renderer.typewriter(null, instruction.text, () => {
+            this.isBlocked = false;
+            this.#syncStateAndScheduleAutosave();
+        });
+    }
+
+    /** @param {string} duration */
+    async #waitIfNotSkipping(duration) {
+        if (this.skipMode) return;
+        const waitMs = this.#parseDurationToMs(duration);
+        this.isBlocked = true;
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        this.isBlocked = false;
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #openAndResolvePuzzle(instruction) {
+        this.isBlocked = true;
+
+        let puzzlePassed = false;
+        if (this.puzzleResolver) {
+            puzzlePassed = await this.puzzleResolver(instruction.puzzleId);
+        } else {
+            console.warn(`[Engine] Puzzle "${instruction.puzzleId}": puzzleResolver no inyectado.`);
+        }
+
+        this.state.setFlag(`${instruction.puzzleId}_result`, String(puzzlePassed));
+        this.#incrementPuzzleCounter(puzzlePassed);
+        console.log(`[Engine] Puzzle "${instruction.puzzleId}" → ${puzzlePassed ? 'PASS' : 'FAIL'}`);
+
+        const resultNarration       = puzzlePassed ? instruction.passText : instruction.failText;
+        this.state.visualState.mode = 'narrate';
+
+        await this.renderer.typewriter(null, resultNarration, () => {
+            this.isBlocked = false;
+            this.#syncStateAndScheduleAutosave();
+        });
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #navigateToScene(instruction) {
+        this.#syncStateSnapshot();
+        if (!this.sceneLoader) {
+            this.state.currentFile = `${instruction.target}.dan`;
+            console.log(`[Engine] GOTO "${instruction.target}": sceneLoader no inyectado.`);
+            return;
+        }
+        await this.sceneLoader(instruction.target, instruction.fadeColor ?? null);
+    }
+
+    /** @param {ParsedInstruction} instruction */
+    async #unlockGalleryCg(instruction) {
+        const alreadyUnlocked = await this.#db.gallery?.get(instruction.cgId);
+        if (alreadyUnlocked) return;
+        const cgPath = `${DEPLOYMENT_BASE_URL}assets/cg/${instruction.cgId}`;
+        await this.#db.gallery?.put({
+            id:         instruction.cgId,
+            title:      instruction.title ?? instruction.cgId,
+            path:       cgPath,
+            unlockedAt: Date.now(),
+        });
+        console.log(`[Engine] CG desbloqueado: "${instruction.cgId}"`);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MODO SKIP
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #cancelSkipMode() {
+        this.skipMode              = false;
+        this.renderer._instantText = false;
+        clearTimeout(this.#readingModeTimer);
+        this.#onSkipStop?.();
+        this.#onSkipStop = null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SINCRONIZACIÓN DE ESTADO Y AUTOSAVE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #syncStateAndScheduleAutosave() {
+        const completedIndex = this.currentIndex - 1;
+        if (completedIndex > this.highWaterMark) {
+            this.highWaterMark = completedIndex;
+        }
+        this.#syncStateSnapshot();
+        this.#scheduleAutosave();
+        this.#scheduleNextAdvanceIfReadingMode();
+    }
+
+    #syncStateSnapshot() {
+        this.state.currentIndex  = this.currentIndex;
+        this.state.highWaterMark = this.highWaterMark;
+        this.state.playTime     += Math.floor((Date.now() - this.#sessionStartTimestamp) / 1000);
+        this.#sessionStartTimestamp = Date.now();
+    }
+
+    #scheduleAutosave() {
+        if (!this.#saveManager) return;
+        clearTimeout(this.#autosaveTimer);
+        this.#autosaveTimer = setTimeout(() => {
+            this.#saveManager.save(this.state, 'autosave')
+                .catch(err => console.error('[Engine] Autosave falló:', err));
+        }, AUTOSAVE_DEBOUNCE_MS);
+    }
+
+    #scheduleNextAdvanceIfReadingMode() {
+        if (this.autoMode) {
+            clearTimeout(this.#readingModeTimer);
+            this.#readingModeTimer = setTimeout(() => {
+                if (this.autoMode && !this.isBlocked) this.next();
+            }, this.autoAdvanceDelayMs);
+
+        } else if (this.skipMode) {
+            const stillHasSeenContent = this.currentIndex <= this.highWaterMark;
+            if (stillHasSeenContent) {
+                clearTimeout(this.#readingModeTimer);
+                this.#readingModeTimer = setTimeout(() => {
+                    if (!this.skipMode || this.#isAdvancing) return;
+                    this.#isAdvancing = true;
+                    this.#advance().finally(() => { this.#isAdvancing = false; });
+                }, SKIP_ADVANCE_INTERVAL_MS);
+            } else {
+                this.#cancelSkipMode();
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RESTAURACIÓN DE ESTADO AL CARGAR
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** @param {{ bgmVolume: number, sfxVolume: number, voiceVolume: number }} audioSettings */
+    #restoreAudioVolumes(audioSettings) {
+        this.audio.setVolume('bgm',   audioSettings.bgmVolume);
+        this.audio.setVolume('se',    audioSettings.sfxVolume);
+        this.audio.setVolume('voice', audioSettings.voiceVolume);
+    }
+
+    /** @param {object} visualState */
+    async #restoreVisualState(visualState) {
+        if (visualState.bg) {
+            await this.renderer.changeBackground(visualState.bg, 'none');
+        }
+        if (visualState.sprites) {
+            await this.#restoreActiveSprites(visualState.sprites);
+        }
+        if (visualState.bgm?.track) {
+            await this.audio.playBGM(visualState.bgm.track, visualState.bgm.vol ?? 0.5);
+        }
+        if (visualState.mode === 'narrate') {
+            this.renderer._setNarrationMode?.(true);
+            this.#lastRenderedTextMode = 'narrate';
+        } else if (visualState.mode === 'dialogue') {
+            this.renderer._setNarrationMode?.(false);
+            this.#lastRenderedTextMode = 'dialogue';
+        }
+    }
+
+    /** @param {Record<SpriteSlot, VisualSlotState>} savedSprites */
+    async #restoreActiveSprites(savedSprites) {
+        for (const [slot, { actorId, path }] of Object.entries(savedSprites)) {
+            if (!this.#loadedCharacters.has(actorId)) {
+                const characterData = await this.#db.characters.get(actorId);
+                if (characterData) {
+                    this.#loadedCharacters.set(actorId, new Character(characterData));
+                }
+            }
+            this.#occupiedSlots[slot] = actorId;
+            await this.renderer.renderSprite(actorId, path, slot, 'none');
+        }
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // EVALUADOR DE CONDICIONES
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Evalúa una condición compilada por el Parser.
-     * @param   {object} cond - instrucción IF_FLAG o IF_INVENTORY original
+     * @param {ParsedInstruction} condition
      * @returns {boolean}
      */
-    _evalCondition(cond) {
-        if (cond.type === 'IF_INVENTORY') {
-            return this.state.hasItem(cond.item);
+    #evaluateCondition(condition) {
+        if (condition.type === 'IF_INVENTORY') {
+            return this.state.hasItem(condition.item);
         }
 
-        if (cond.type === 'IF_FLAG') {
-            const raw     = this.state.getFlag(cond.key, null);
-            const current = this._coerce(raw);
-            const target  = this._coerce(cond.value);
-            const op      = cond.op;
+        if (condition.type === 'IF_FLAG') {
+            const storedValue   = this.#coerceToNativeType(this.state.getFlag(condition.key, null));
+            const expectedValue = this.#coerceToNativeType(condition.value);
 
-            switch (op) {
-                case '==': return current == target;
-                case '!=': return current != target;
-                case '>':  return Number(current) >  Number(target);
-                case '<':  return Number(current) <  Number(target);
-                case '>=': return Number(current) >= Number(target);
-                case '<=': return Number(current) <= Number(target);
+            switch (condition.op) {
+                case '==': return storedValue == expectedValue;
+                case '!=': return storedValue != expectedValue;
+                case '>':  return Number(storedValue) >  Number(expectedValue);
+                case '<':  return Number(storedValue) <  Number(expectedValue);
+                case '>=': return Number(storedValue) >= Number(expectedValue);
+                case '<=': return Number(storedValue) <= Number(expectedValue);
                 default:
-                    console.warn(`[Engine] Operador desconocido: "${op}"`);
+                    console.warn(`[Engine] Operador desconocido: "${condition.op}"`);
                     return false;
             }
         }
 
-        console.warn(`[Engine] Tipo de condición desconocido: "${cond.type}"`);
+        console.warn(`[Engine] Tipo de condición desconocido: "${condition.type}"`);
         return false;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // UTILIDADES PRIVADAS
+    // ─────────────────────────────────────────────────────────────────────────
+
     /**
-     * Convierte strings a sus tipos nativos para comparación.
-     * 'true'/'false' → boolean, números → number, resto → string.
+     * Convierte un string a su tipo nativo para comparaciones de condiciones.
+     * @param {*} rawValue
+     * @returns {boolean|number|string}
      */
-    _coerce(val) {
-        if (val === 'true')  return true;
-        if (val === 'false') return false;
-        const n = Number(val);
-        return isNaN(n) ? val : n;
+    #coerceToNativeType(rawValue) {
+        if (rawValue === 'true')  return true;
+        if (rawValue === 'false') return false;
+        const asNumber = Number(rawValue);
+        return isNaN(asNumber) ? rawValue : asNumber;
     }
 
-    _syncState() {
-        this.state.currentIndex = this.currentIndex;
-        this.state.playTime    += Math.floor((Date.now() - this._sessionStart) / 1000);
-        this._sessionStart      = Date.now();
-        this.state.highWaterMark = this.highWaterMark;
+    /**
+     * @param {string} durationString — '2s', '500ms', '1.5s'
+     * @returns {number}
+     */
+    #parseDurationToMs(durationString) {
+        if (durationString.endsWith('ms')) return parseInt(durationString);
+        return Math.round(parseFloat(durationString) * 1000);
     }
 
-    _syncStateAndSave() {
-        // Avanzar el marcador de progreso
-        if (this.currentIndex - 1 > this.highWaterMark)
-            this.highWaterMark = this.currentIndex - 1;
-        this._syncState();
-
-        // Autosave con debounce — cancela la escritura anterior si llega otra
-        // antes de 2.5s. Evita microfreezes en hardware lento por writes continuos.
-        if (this.saveManager) {
-            clearTimeout(this._autosaveTimer);
-            this._autosaveTimer = setTimeout(() => {
-                this.saveManager.save(this.state, 'autosave')
-                    .catch(err => console.error('[Engine] Autosave falló:', err));
-            }, 2500);
-        }
-
-        // Auto-avance si está activo
-        if (this.autoMode) {
-            clearTimeout(this._autoTimer);
-            this._autoTimer = setTimeout(() => {
-                if (this.autoMode && !this.isBlocked) this.next();
-            }, this.autoDelay);
-
-        // Skip mode: continuar si aún hay contenido ya visto por delante
-        } else if (this.skipMode) {
-            if (this.currentIndex <= this.highWaterMark) {
-                clearTimeout(this._autoTimer);
-                this._autoTimer = setTimeout(() => {
-                    if (!this.skipMode || this._nextRunning) return;
-                    // Llamar _nextInternal directamente — sabemos que isBlocked = false
-                    // y evitamos que los guards de next() descarten el avance.
-                    this._nextRunning = true;
-                    this._nextInternal().finally(() => { this._nextRunning = false; });
-                }, 30);
-            } else {
-                // Llegamos al límite del contenido visto — parar automáticamente
-                this._stopSkip();
-            }
-        }
+    /**
+     * @param {string} relativePath
+     * @returns {string}
+     */
+    #buildAssetUrl(relativePath) {
+        return `${DEPLOYMENT_BASE_URL}${relativePath.replace(/^\//, '')}`;
     }
 
-    /** '2s' → 2000 | '500ms' → 500 | '1.5s' → 1500 */
-    _parseDuration(str) {
-        if (str.endsWith('ms')) return parseInt(str);
-        return Math.round(parseFloat(str) * 1000);
+    /** @param {BacklogEntry} entry */
+    #pushToBacklog(entry) {
+        this.backlog.push(entry);
+        if (this.backlog.length > BACKLOG_MAX_ENTRIES) this.backlog.shift();
     }
 
-    _getActorSlot(actorId) {
-        return Object.keys(this.slots).find(k => this.slots[k] === actorId) ?? null;
+    /** @param {boolean} puzzlePassed */
+    #incrementPuzzleCounter(puzzlePassed) {
+        const counterKey   = puzzlePassed ? 'puzzles_solved' : 'puzzles_failed';
+        const currentCount = this.state.getFlag(counterKey, 0) ?? 0;
+        this.state.setFlag(counterKey, String(Number(currentCount) + 1));
     }
 
-    _clearActorFromSlots(actorId) {
-        const old = this._getActorSlot(actorId);
-        if (old) this.slots[old] = null;
+    /**
+     * @param {string} actorId
+     * @returns {SpriteSlot|null}
+     */
+    #findSlotOccupiedByCharacter(actorId) {
+        return Object.keys(this.#occupiedSlots)
+            .find(slot => this.#occupiedSlots[slot] === actorId) ?? null;
     }
+
+    /** @param {string} actorId */
+    #removeCharacterFromOccupiedSlots(actorId) {
+        const previousSlot = this.#findSlotOccupiedByCharacter(actorId);
+        if (previousSlot) this.#occupiedSlots[previousSlot] = null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // COMPATIBILIDAD — proxies para nombres heredados
+    // Módulos externos aún referencian estos nombres.
+    // Eliminar cuando MenuSystem y canvas.js se actualicen.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** @deprecated usar toggleAutoMode() */
+    toggleAuto()        { return this.toggleAutoMode(); }
+
+    /** @deprecated usar triggerSkipMode() */
+    triggerSkip(onStop) { return this.triggerSkipMode(onStop); }
+
+    /** @deprecated usar stopAllReadingModes() */
+    stopModes()         { return this.stopAllReadingModes(); }
 }

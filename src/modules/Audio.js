@@ -1,308 +1,288 @@
 // src/modules/Audio.js
-//
-// CANALES DE AUDIO:
-//   bgm   → Música de fondo. Loop continuo. Soporta fade out.
-//   voice → Voz del personaje activo. Se interrumpe al cambiar de línea.
-//   se    → Efectos de sonido puntuales (one-shot).
-//
-// Usa HTMLAudioElement (sin dependencias). Suficiente para novelas visuales.
-// Si en el futuro necesitas audio posicional o síntesis, migrar a Web Audio API.
 
-// Formatos de audio soportados en orden de preferencia.
-const AUDIO_FORMATS = ['mp3', 'ogg'];
+import { Howl, Howler } from 'howler';
 
-// Rutas base por canal.
-// Si el param que viene del script ya empieza con '/', se usa directamente.
-// Si no (ej: 'track_01'), se le añade el prefijo del canal.
-const AUDIO_BASE = {
-    bgm:   `${import.meta.env.BASE_URL}assets/audio/bgm/`,
-    voice: `${import.meta.env.BASE_URL}assets/audio/voice/`,
-    se:    `${import.meta.env.BASE_URL}assets/audio/se/`,
+// ─── Constantes ───────────────────────────────────────────────────────────────
+
+const AUDIO_BASE_URL = import.meta.env.BASE_URL;
+
+const AUDIO_CHANNEL_PATHS = {
+    bgm:   `${AUDIO_BASE_URL}assets/audio/bgm/`,
+    voice: `${AUDIO_BASE_URL}assets/audio/voice/`,
+    se:    `${AUDIO_BASE_URL}assets/audio/se/`,
 };
 
+/** Formatos en orden de preferencia — Howler elige el primero compatible */
+const SUPPORTED_AUDIO_FORMATS = ['mp3', 'ogg'];
+
+const BGM_DUCK_FACTOR_VOICE  = 0.35; // BGM baja al 35% mientras habla un personaje
+const BGM_DUCK_FACTOR_PAUSED = 0.20; // BGM baja al 20% al abrir el menú de pausa
+
+const DUCK_FADE_VOICE_MS  = 220;
+const DUCK_FADE_RESUME_MS = 400;
+const DUCK_FADE_PAUSE_MS  = 300;
+const BGM_STOP_FADE_MS    = 1000;
+
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
+
 /**
- * Resuelve la ruta de audio intentando múltiples formatos.
- * Devuelve la primera URL que el navegador puede reproducir,
- * o el path original si ya tiene extensión o ninguno funciona.
- * @param   {string} path
- * @returns {Promise<string>}
+ * @typedef {'bgm' | 'voice' | 'se'} AudioChannel
  */
+
 /**
- * Resuelve la ruta de audio:
- *   1. Si el param ya es una ruta absoluta ('/assets/...'), se usa directo.
- *   2. Si no, se añade el prefijo del canal (bgm/voice/se).
- *   3. Si no tiene extensión, se prueba mp3 → ogg via HEAD request.
- * @param {string} param   - Valor del param del script ('.ems')
- * @param {string} channel - 'bgm' | 'voice' | 'se'
+ * @typedef {Object} ChannelVolumes
+ * @property {number} bgm   - 0.0 a 1.0
+ * @property {number} voice - 0.0 a 1.0
+ * @property {number} se    - 0.0 a 1.0
  */
-async function resolveAudioPath(param, channel = 'bgm') {
-    // Si ya es ruta absoluta, respetar tal cual
-    const path = param.startsWith('/') ? param : `${AUDIO_BASE[channel]}${param}`;
 
-    const hasExt = AUDIO_FORMATS.some(f => path.toLowerCase().endsWith(`.${f}`));
-    if (hasExt) return path;
+// ─── AudioManager ─────────────────────────────────────────────────────────────
 
-    for (const fmt of AUDIO_FORMATS) {
-        const candidate = `${path}.${fmt}`;
-        try {
-            const res = await fetch(candidate, { method: 'HEAD' });
-            if (res.ok) return candidate;
-        } catch { /* continuar */ }
-    }
-
-    return `${path}.mp3`; // fallback
-}
-
+/**
+ * Gestor de audio del motor. Tres canales independientes: BGM, voz y efectos.
+ *
+ * Internamente usa Howler.js (Web Audio API con fallback a HTML5 Audio).
+ * La API pública es idéntica hacia el Engine y el MenuSystem — ningún módulo
+ * externo necesita saber que existe Howler.
+ *
+ * Canales:
+ * - `bgm`   — música de fondo, loop continuo, soporta fade y ducking
+ * - `voice` — voz del personaje activo, interrumpe la anterior al cambiar
+ * - `se`    — efectos de sonido puntuales (one-shot), no interrumpen nada
+ *
+ * Ducking:
+ * - Al reproducir voz: BGM baja al 35% con fade suave, sube al terminar
+ * - Al pausar el juego: BGM baja al 20% con fade, sube al reanudar
+ *
+ * @example
+ * const audio = new AudioManager();
+ * audio.unlock(); // llamar tras el primer gesto del usuario
+ * await audio.playBGM('track_01', 0.4);
+ * await audio.playVoice('VAL_001.mp3');
+ */
 export class AudioManager {
-    constructor() {
-        // Cada canal es un HTMLAudioElement independiente
-        this._bgm   = new Audio();
-        this._voice = new Audio();
-        this._se    = new Audio();
 
-        this._bgm.loop = true;
+    // ── Canal BGM ──────────────────────────────────────────────────────────
 
-        // Volúmenes por canal (0.0 → 1.0)
-        this._volumes = {
-            bgm:   0.5,
-            voice: 1.0,
-            se:    0.8,
-        };
+    /** @type {Howl|null} — instancia Howl activa del BGM actual */
+    #activeBgmHowl = null;
 
-        this._bgmFadeTimer = null; // referencia al intervalo de fade activo
+    /** @type {string|null} — nombre de pista activa para evitar recargas */
+    #activeBgmTrackName = null;
 
-        // Ducking: cuando hay voz activa, el BGM baja al % definido
-        this._bgmBaseVolume  = this._volumes.bgm; // volumen real sin duck
-        this._duckFactor     = 0.35; // BGM baja al 35% mientras habla un personaje
-        this._duckRafId      = null;
+    /**
+     * Volumen base del BGM sin ducking aplicado.
+     * El ducking opera sobre este valor, no sobre el volumen actual.
+     * @type {number}
+     */
+    #bgmBaseVolume = 0.5;
 
-        // Restaurar BGM cuando la voz termina
-        this._voice.addEventListener('ended', () => this._unduckBGM());
-        this._voice.addEventListener('pause', () => {
-            // Solo restaurar si fue pausa definitiva (src vacío = stop manual)
-            if (!this._voice.src) this._unduckBGM();
-        });
-    }
+    // ── Canales de voz y efectos ───────────────────────────────────────────
+
+    /** @type {Howl|null} */
+    #activeVoiceHowl = null;
+
+    /** @type {Howl|null} */
+    #activeSeHowl = null;
+
+    // ── Volúmenes por canal ────────────────────────────────────────────────
+
+    /** @type {ChannelVolumes} */
+    #channelVolumes = {
+        bgm:   0.5,
+        voice: 1.0,
+        se:    0.8,
+    };
 
     // ─────────────────────────────────────────────────────────────────────────
     // API PÚBLICA
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Reproduce música de fondo en loop.
-     * Si ya hay una pista activa, la reemplaza.
-     * @param {string} path   - Ruta al archivo (ej: 'assets/audio/bgm/forest.mp3')
-     * @param {number} volume - Volumen inicial (0.0–1.0). Usa el canal por defecto si no se pasa.
+     * Desbloquea el contexto de audio del navegador.
+     * Los navegadores modernos requieren un gesto del usuario antes de reproducir.
+     * Llamar desde el handler del primer clic del jugador.
      */
-    async playBGM(path, volume) {
-        const resolved = await resolveAudioPath(path, 'bgm');
-        if (this._bgm.src.endsWith(resolved) && !this._bgm.paused) return;
-
-        this._cancelFade();
-        this._bgm.src    = resolved;
-        this._bgmBaseVolume = volume ?? this._volumes.bgm;
-        this._bgm.volume    = this._bgmBaseVolume;
-        this._bgm.currentTime = 0;
-        this._bgm.play().catch(e => console.warn(`[Audio] BGM: ${e.message} (${resolved})`));
+    unlock() {
+        // Howler gestiona el desbloqueo internamente — este método existe
+        // para mantener compatibilidad con el contrato público anterior.
+        // Una llamada explícita a Howler.ctx?.resume() cubre edge cases.
+        Howler.ctx?.resume();
     }
 
     /**
-     * Detiene la BGM con fade out gradual.
-     * @param {number} durationMs - Duración del fade en milisegundos.
+     * Reproduce música de fondo en loop continuo.
+     * Si la misma pista ya está sonando, no hace nada.
+     * Si hay otra pista activa, la reemplaza inmediatamente.
+     *
+     * @param {string} trackName - Nombre del archivo sin extensión
+     * @param {number} [volume]  - Volumen (0.0–1.0). Usa el valor del canal si no se pasa.
      */
-    stopBGM(durationMs = 1000) {
-        if (this._bgm.paused) return;
-        this._fadeOut(this._bgm, durationMs, () => {
-            this._bgm.pause();
-            this._bgm.currentTime = 0;
+    async playBGM(trackName, volume) {
+        const targetVolume = volume ?? this.#channelVolumes.bgm;
+
+        if (this.#activeBgmTrackName === trackName && this.#activeBgmHowl?.playing()) return;
+
+        this.#stopBgmImmediately();
+
+        this.#bgmBaseVolume     = targetVolume;
+        this.#activeBgmTrackName = trackName;
+
+        this.#activeBgmHowl = new Howl({
+            src:    this.#buildSourceUrls(trackName, 'bgm'),
+            volume: targetVolume,
+            loop:   true,
+            onloaderror: (id, error) => {
+                console.error(`[Audio] BGM no encontrado: "${trackName}"`, error);
+            },
+        });
+
+        this.#activeBgmHowl.play();
+    }
+
+    /**
+     * Detiene el BGM con fade out gradual.
+     * @param {number} [fadeDurationMs]
+     */
+    stopBGM(fadeDurationMs = BGM_STOP_FADE_MS) {
+        if (!this.#activeBgmHowl?.playing()) return;
+        this.#activeBgmHowl.fade(this.#activeBgmHowl.volume(), 0, fadeDurationMs);
+        this.#activeBgmHowl.once('fade', () => {
+            this.#activeBgmHowl?.stop();
+            this.#activeBgmHowl     = null;
+            this.#activeBgmTrackName = null;
         });
     }
 
     /**
-     * Reproduce la línea de voz de un personaje.
-     * Interrumpe cualquier voz anterior automáticamente.
-     * @param {string} path - Ruta al archivo (ej: 'assets/audio/voice/VAL_001.mp3')
+     * Reproduce una línea de voz. Interrumpe cualquier voz anterior.
+     * Al terminar, restaura el BGM al volumen base (unduck).
+     *
+     * @param {string} voiceFilename - Nombre del archivo con extensión (ej: 'VAL_001.mp3')
      */
-    async playVoice(path) {
-        const resolved = await resolveAudioPath(path, 'voice');
-        this._voice.pause();
-        this._voice.src    = resolved;
-        this._voice.volume = this._volumes.voice;
-        this._voice.currentTime = 0;
-        this._voice.play()
-            .then(() => this._duckBGM()) // ducking solo si la voz arrancó bien
-            .catch(e => console.warn(`[Audio] Voz: ${e.message} (${resolved})`));
+    async playVoice(voiceFilename) {
+        this.#activeVoiceHowl?.stop();
+
+        const voicePath = `${AUDIO_CHANNEL_PATHS.voice}${voiceFilename}`;
+
+        this.#activeVoiceHowl = new Howl({
+            src:    [voicePath],
+            volume: this.#channelVolumes.voice,
+            onplay: () => this.#duckBgmForVoice(),
+            onend:  () => this.#unduckBgmAfterVoice(),
+            onstop: () => this.#unduckBgmAfterVoice(),
+            onloaderror: (id, error) => {
+                console.warn(`[Audio] Voz no encontrada: "${voiceFilename}"`, error);
+            },
+        });
+
+        this.#activeVoiceHowl.play();
     }
 
     /**
      * Reproduce un efecto de sonido (one-shot).
-     * No interrumpe ni la BGM ni la voz.
-     * @param {string} path   - Ruta al archivo
-     * @param {number} volume - Volumen específico para este SE
+     * No interrumpe el BGM ni la voz.
+     *
+     * @param {string} effectName - Nombre del archivo sin extensión
+     * @param {number} [volume]   - Volumen específico para este efecto
      */
-    async playSE(path, volume) {
-        const resolved = await resolveAudioPath(path, 'se');
-        this._se.pause();
-        this._se.src    = resolved;
-        this._se.volume = volume ?? this._volumes.se;
-        this._se.currentTime = 0;
-        this._se.play().catch(e => console.warn(`[Audio] SE: ${e.message} (${resolved})`));
+    async playSE(effectName, volume) {
+        this.#activeSeHowl?.stop();
+
+        this.#activeSeHowl = new Howl({
+            src:    this.#buildSourceUrls(effectName, 'se'),
+            volume: volume ?? this.#channelVolumes.se,
+            onloaderror: (id, error) => {
+                console.warn(`[Audio] Efecto no encontrado: "${effectName}"`, error);
+            },
+        });
+
+        this.#activeSeHowl.play();
     }
 
     /**
-     * Ajusta el volumen de un canal.
-     * @param {'bgm'|'voice'|'se'} channel
-     * @param {number}             value    - 0.0 a 1.0
+     * Ajusta el volumen de un canal y lo aplica inmediatamente.
+     * @param {AudioChannel} channel
+     * @param {number}       volume  - 0.0 a 1.0
      */
-    setVolume(channel, value) {
-        const clamped = Math.max(0, Math.min(1, value));
-        this._volumes[channel] = clamped;
+    setVolume(channel, volume) {
+        const clampedVolume = Math.max(0, Math.min(1, volume));
+        this.#channelVolumes[channel] = clampedVolume;
 
-        // Aplicar inmediatamente al elemento activo
         if (channel === 'bgm') {
-            this._bgmBaseVolume = clamped; // actualizar base para ducking
-            this._bgm.volume    = clamped;
+            this.#bgmBaseVolume = clampedVolume;
+            this.#activeBgmHowl?.volume(clampedVolume);
         }
-        if (channel === 'voice') this._voice.volume = clamped;
-        if (channel === 'se')    this._se.volume    = clamped;
+        if (channel === 'voice') this.#activeVoiceHowl?.volume(clampedVolume);
+        if (channel === 'se')    this.#activeSeHowl?.volume(clampedVolume);
     }
 
     /** Silencia todos los canales instantáneamente. */
     muteAll() {
-        this._bgm.muted   = true;
-        this._voice.muted = true;
-        this._se.muted    = true;
+        Howler.mute(true);
     }
 
-    /** Restaura el audio después de un mute. */
+    /** Restaura todos los canales tras un mute. */
     unmuteAll() {
-        this._bgm.muted   = false;
-        this._voice.muted = false;
-        this._se.muted    = false;
+        Howler.mute(false);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // DESBLOQUEO DE AUDIO
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Ducking de pausa ───────────────────────────────────────────────────
 
     /**
-     * Desbloquea el contexto de audio del navegador.
-     * Los navegadores modernos requieren un gesto del usuario antes de reproducir.
-     * Llamar desde el handler del clic de "Nueva Partida" / "Continuar".
-     */
-    unlock() {
-        // Reproducir y pausar inmediatamente un silencio — esto desbloquea el contexto
-        const silent = new Audio();
-        silent.play().catch(() => {}); // el catch es intencional
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // HELPERS PRIVADOS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * Reduce el volumen de un elemento de audio gradualmente.
-     * @param {HTMLAudioElement} audioEl
-     * @param {number}           durationMs
-     * @param {Function}         onComplete - Callback al finalizar
-     */
-    _fadeOut(audioEl, durationMs, onComplete) {
-        this._cancelFade();
-        const startVolume = audioEl.volume;
-        const startTime   = performance.now();
-
-        const tick = () => {
-            const t = Math.min((performance.now() - startTime) / durationMs, 1);
-            // Ease-out para que el fade suene natural
-            audioEl.volume = startVolume * (1 - (t * t));
-            if (t < 1) {
-                this._bgmFadeTimer = requestAnimationFrame(tick);
-            } else {
-                audioEl.volume = 0;
-                this._bgmFadeTimer = null;
-                onComplete?.();
-            }
-        };
-        this._bgmFadeTimer = requestAnimationFrame(tick);
-    }
-
-    _cancelFade() {
-        if (this._bgmFadeTimer) {
-            cancelAnimationFrame(this._bgmFadeTimer);
-            this._bgmFadeTimer = null;
-        }
-    }
-
-    // ── Ducking helpers ───────────────────────────────────────────────────────
-
-    /**
-     * Duck suave al entrar en pausa — baja el BGM al 20% con ease-in.
-     * Más pronunciado que el duck de voz porque es una pausa activa del usuario.
+     * Baja el BGM al 20% al entrar en el menú de pausa.
+     * Más pronunciado que el ducking de voz — indica una pausa activa.
      */
     pauseDuck() {
-        if (this._bgm.paused) return;
-        cancelAnimationFrame(this._duckRafId);
-        const startVol  = this._bgm.volume;
-        const targetVol = this._bgmBaseVolume * 0.20;
-        const durationMs = 300;
-        const startTime  = performance.now();
-        const tick = () => {
-            const t = Math.min((performance.now() - startTime) / durationMs, 1);
-            const ease = t * t; // ease-in — baja rápido al principio
-            this._bgm.volume = startVol + (targetVol - startVol) * ease;
-            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
-        };
-        this._duckRafId = requestAnimationFrame(tick);
+        if (!this.#activeBgmHowl?.playing()) return;
+        const targetVolume = this.#bgmBaseVolume * BGM_DUCK_FACTOR_PAUSED;
+        this.#activeBgmHowl.fade(this.#activeBgmHowl.volume(), targetVolume, DUCK_FADE_PAUSE_MS);
     }
 
-    /** Restaura el BGM al salir de pausa — ease-out cúbico. */
+    /** Restaura el BGM al salir del menú de pausa. */
     pauseUnduck() {
-        if (this._bgm.paused) return;
-        cancelAnimationFrame(this._duckRafId);
-        const startVol   = this._bgm.volume;
-        const targetVol  = this._bgmBaseVolume;
-        const durationMs = 500;
-        const startTime  = performance.now();
-        const tick = () => {
-            const t = Math.min((performance.now() - startTime) / durationMs, 1);
-            const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
-            this._bgm.volume = startVol + (targetVol - startVol) * ease;
-            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
-        };
-        this._duckRafId = requestAnimationFrame(tick);
+        if (!this.#activeBgmHowl?.playing()) return;
+        this.#activeBgmHowl.fade(this.#activeBgmHowl.volume(), this.#bgmBaseVolume, DUCK_FADE_RESUME_MS);
     }
 
-    _duckBGM() {
-        if (this._bgm.paused) return;
-        cancelAnimationFrame(this._duckRafId);
-        const startVol  = this._bgm.volume;
-        const targetVol = this._bgmBaseVolume * this._duckFactor;
-        const durationMs = 220;
-        const startTime  = performance.now();
+    // ─────────────────────────────────────────────────────────────────────────
+    // DUCKING INTERNO — activado por eventos de voz
+    // ─────────────────────────────────────────────────────────────────────────
 
-        const tick = () => {
-            const t = Math.min((performance.now() - startTime) / durationMs, 1);
-            const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-            this._bgm.volume = startVol + (targetVol - startVol) * ease;
-            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
-        };
-        this._duckRafId = requestAnimationFrame(tick);
+    #duckBgmForVoice() {
+        if (!this.#activeBgmHowl?.playing()) return;
+        const targetVolume = this.#bgmBaseVolume * BGM_DUCK_FACTOR_VOICE;
+        this.#activeBgmHowl.fade(this.#activeBgmHowl.volume(), targetVolume, DUCK_FADE_VOICE_MS);
     }
 
-    _unduckBGM() {
-        if (this._bgm.paused) return;
-        cancelAnimationFrame(this._duckRafId);
-        const startVol   = this._bgm.volume;
-        const targetVol  = this._bgmBaseVolume;
-        const durationMs = 400;
-        const startTime  = performance.now();
+    #unduckBgmAfterVoice() {
+        if (!this.#activeBgmHowl?.playing()) return;
+        this.#activeBgmHowl.fade(this.#activeBgmHowl.volume(), this.#bgmBaseVolume, DUCK_FADE_RESUME_MS);
+    }
 
-        const tick = () => {
-            const t = Math.min((performance.now() - startTime) / durationMs, 1);
-            const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
-            this._bgm.volume = startVol + (targetVol - startVol) * ease;
-            if (t < 1) this._duckRafId = requestAnimationFrame(tick);
-        };
-        this._duckRafId = requestAnimationFrame(tick);
+    // ─────────────────────────────────────────────────────────────────────────
+    // UTILIDADES PRIVADAS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Construye el array de URLs de fuente para Howler.
+     * Howler elige automáticamente el primer formato compatible con el navegador.
+     *
+     * @param {string}       trackName
+     * @param {AudioChannel} channel
+     * @returns {string[]}
+     */
+    #buildSourceUrls(trackName, channel) {
+        const basePath = `${AUDIO_CHANNEL_PATHS[channel]}${trackName}`;
+        return SUPPORTED_AUDIO_FORMATS.map(format => `${basePath}.${format}`);
+    }
+
+    /** Detiene el BGM activo sin fade — para reemplazos inmediatos. */
+    #stopBgmImmediately() {
+        if (!this.#activeBgmHowl) return;
+        this.#activeBgmHowl.stop();
+        this.#activeBgmHowl.unload();
+        this.#activeBgmHowl     = null;
+        this.#activeBgmTrackName = null;
     }
 }

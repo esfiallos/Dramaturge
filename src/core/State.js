@@ -1,103 +1,210 @@
 // src/core/State.js
-//
-// GameState es el ÚNICO objeto que se serializa para save/load.
-// El Engine lo mantiene sincronizado; SaveManager lo persiste.
-//
-//   Todos los campos de esta clase deben ser primitivos, arrays, u objetos planos.
-//   No guardar instancias de clases, Promises, ni referencias al DOM.
 
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {Object} AudioSettings
+ * @property {number} bgmVolume   - 0.0 a 1.0
+ * @property {number} sfxVolume   - 0.0 a 1.0
+ * @property {number} voiceVolume - 0.0 a 1.0
+ */
+
+/**
+ * @typedef {Object} ActiveBgmState
+ * @property {string} track - Nombre del archivo sin extensión
+ * @property {number} vol   - Volumen al momento de guardar (0.0 a 1.0)
+ */
+
+/**
+ * @typedef {Object} SpriteSlotState
+ * @property {string} actorId - ID del personaje ocupando el slot
+ * @property {string} path    - Ruta completa del sprite activo
+ */
+
+/**
+ * @typedef {Object} VisualState
+ * @property {string|null}                       bg      - Nombre del fondo activo o null
+ * @property {Record<string, SpriteSlotState>}   sprites - Estado de cada slot de sprite
+ * @property {'dialogue' | 'narrate' | null}     mode    - Modo de textbox activo
+ * @property {ActiveBgmState|null}               bgm     - BGM activo o null
+ */
+
+/**
+ * @typedef {Object} GameStateSnapshot
+ * @property {string}                    currentFile
+ * @property {number}                    currentIndex
+ * @property {number}                    highWaterMark
+ * @property {Record<string, *>}         flags
+ * @property {string[]}                  inventory
+ * @property {AudioSettings}             audioSettings
+ * @property {VisualState}               visualState
+ * @property {number|null}               savedAt
+ * @property {number}                    playTime
+ */
+
+// ─── GameState ────────────────────────────────────────────────────────────────
+
+/**
+ * Estado serializable completo de una partida.
+ *
+ * Es el único objeto que viaja entre el Engine y el SaveManager.
+ * Todos sus campos deben ser primitivos, arrays u objetos planos —
+ * sin instancias de clases, Promises ni referencias al DOM.
+ *
+ * El Engine lo mantiene sincronizado; SaveManager lo persiste en Dexie.
+ *
+ * @example
+ * const state = new GameState();
+ * state.setFlag('cap01_completo', 'true');
+ * state.addItem('llave_maestra');
+ * const snapshot = state.toJSON(); // listo para Dexie
+ */
 export class GameState {
-    constructor(data = {}) {
-        // ── Progreso narrativo ────────────────────────────────────────────
-        // Nombre del archivo .dan activo (para cargar el script correcto al reanudar)
-        this.currentFile  = data.currentFile  ?? 'inicio.dan';
 
-        // Índice de la próxima instrucción a ejecutar.
-        // Se sincroniza con engine.currentIndex antes de cada save.
-        this.currentIndex = data.currentIndex ?? 0;
+    // ── Progreso narrativo ─────────────────────────────────────────────────
 
-        // ── Flags de historia ─────────────────────────────────────────────
-        // Activados con: set flag.key = value
-        // Ejemplo: { 'puzzle_P01_solved': true, 'conociste_a_miki': true }
-        this.flags        = data.flags        ?? {};
+    /** @type {string} — archivo .dan activo, necesario para reanudar la partida */
+    currentFile;
 
-        // ── Inventario ────────────────────────────────────────────────────
-        // Array de strings (item keys). Sin duplicados.
-        // Modificado con: set inventory.add key  /  set inventory.remove key
-        this.inventory    = data.inventory    ?? [];
+    /** @type {number} — índice de la próxima instrucción a ejecutar */
+    currentIndex;
 
-        // ── Configuración de audio ────────────────────────────────────────
-        // Persiste entre sesiones. Modificado desde el panel de ajustes.
+    /**
+     * Índice más alto completado por el jugador en esta partida.
+     * El modo skip solo avanza hasta este punto — nunca más allá.
+     * @type {number}
+     */
+    highWaterMark;
+
+    // ── Historia y objetos ─────────────────────────────────────────────────
+
+    /**
+     * Flags de historia activados con `set flag.key = value`.
+     * @type {Record<string, boolean|number|string>}
+     */
+    flags;
+
+    /**
+     * Inventario del jugador. Array sin duplicados.
+     * Modificado con `set inventory.add` y `set inventory.remove`.
+     * @type {string[]}
+     */
+    inventory;
+
+    // ── Preferencias persistentes ──────────────────────────────────────────
+
+    /** @type {AudioSettings} */
+    audioSettings;
+
+    // ── Estado visual y de audio para restaurar al cargar ─────────────────
+
+    /** @type {VisualState} */
+    visualState;
+
+    // ── Metadata del save ──────────────────────────────────────────────────
+
+    /** @type {number|null} — timestamp del último guardado */
+    savedAt;
+
+    /** @type {number} — segundos acumulados de juego */
+    playTime;
+
+    /** @param {Partial<GameStateSnapshot>} [snapshot] */
+    constructor(snapshot = {}) {
+        this.currentFile   = snapshot.currentFile   ?? 'inicio.dan';
+        this.currentIndex  = snapshot.currentIndex  ?? 0;
+        this.highWaterMark = snapshot.highWaterMark ?? 0;
+        this.flags         = snapshot.flags         ?? {};
+        this.inventory     = snapshot.inventory     ?? [];
+        this.savedAt       = snapshot.savedAt       ?? null;
+        this.playTime      = snapshot.playTime      ?? 0;
+
         this.audioSettings = {
-            bgmVolume:   data.audioSettings?.bgmVolume   ?? 0.5,
-            sfxVolume:   data.audioSettings?.sfxVolume   ?? 0.8,
-            voiceVolume: data.audioSettings?.voiceVolume ?? 1.0,
+            bgmVolume:   snapshot.audioSettings?.bgmVolume   ?? 0.5,
+            sfxVolume:   snapshot.audioSettings?.sfxVolume   ?? 0.8,
+            voiceVolume: snapshot.audioSettings?.voiceVolume ?? 1.0,
         };
 
-        // ── Estado visual activo ─────────────────────────────────────────────
-        // Guardado automáticamente por el Engine en cada BG_CHANGE / SPRITE_SHOW/HIDE.
-        // Permite restaurar la pantalla al cargar sin tener que re-ejecutar el script.
-        //
-        //   bg:      ruta del fondo activo  (string | null)
-        //   sprites: { slot → { actorId, path } }  — slots 'left','center','right'
-        //   mode:    'dialogue' | 'narrate' | null  — modo de textbox activo
-        this.visualState = data.visualState ?? { bg: null, sprites: {}, mode: null };
-
-        // ── Progreso de lectura — para el modo skip ─────────────────────
-        // Índice más alto completado por el jugador.
-        // Skip solo avanza automáticamente hasta este punto — nunca más allá.
-        this.highWaterMark = data.highWaterMark ?? 0;
-
-        // ── Metadata del save ─────────────────────────────────────────────────
-        this.savedAt  = data.savedAt  ?? null; // timestamp del último guardado
-        this.playTime = data.playTime ?? 0;    // segundos acumulados de juego
+        this.visualState = {
+            bg:      snapshot.visualState?.bg      ?? null,
+            sprites: snapshot.visualState?.sprites ?? {},
+            mode:    snapshot.visualState?.mode    ?? null,
+            bgm:     snapshot.visualState?.bgm     ?? null,
+        };
     }
 
-    // ─── Operaciones de inventario ────────────────────────────────────────────
+    // ── Inventario ─────────────────────────────────────────────────────────
 
+    /**
+     * Añade un ítem al inventario si no existe ya.
+     * @param {string} itemKey
+     */
     addItem(itemKey) {
         if (!this.inventory.includes(itemKey)) {
             this.inventory.push(itemKey);
         }
     }
 
+    /**
+     * Elimina un ítem del inventario.
+     * @param {string} itemKey
+     */
     removeItem(itemKey) {
-        this.inventory = this.inventory.filter(k => k !== itemKey);
+        this.inventory = this.inventory.filter(key => key !== itemKey);
     }
 
+    /**
+     * @param {string} itemKey
+     * @returns {boolean}
+     */
     hasItem(itemKey) {
         return this.inventory.includes(itemKey);
     }
 
-    // ─── Operaciones de flags ─────────────────────────────────────────────────
+    // ── Flags ──────────────────────────────────────────────────────────────
 
-    setFlag(key, value) {
-        // Parsear el valor si viene como string desde el Parser
-        if (value === 'true')  this.flags[key] = true;
-        else if (value === 'false') this.flags[key] = false;
-        else if (!isNaN(value))     this.flags[key] = Number(value);
-        else                        this.flags[key] = value; // string literal
+    /**
+     * Establece un flag parseando el valor a su tipo nativo.
+     * `'true'`/`'false'` → boolean, numéricos → number, resto → string.
+     *
+     * @param {string} key
+     * @param {string} rawValue — valor como string desde el Parser
+     */
+    setFlag(key, rawValue) {
+        if (rawValue === 'true')       this.flags[key] = true;
+        else if (rawValue === 'false') this.flags[key] = false;
+        else if (!isNaN(rawValue))     this.flags[key] = Number(rawValue);
+        else                           this.flags[key] = rawValue;
     }
 
-    getFlag(key, defaultValue = null) {
-        return this.flags[key] ?? defaultValue;
+    /**
+     * @param {string} key
+     * @param {*}      [fallback=null]
+     * @returns {boolean|number|string|null}
+     */
+    getFlag(key, fallback = null) {
+        return this.flags[key] ?? fallback;
     }
 
-    // ─── Serialización ────────────────────────────────────────────────────────
+    // ── Serialización ──────────────────────────────────────────────────────
 
-    /** Devuelve un objeto plano listo para guardar en Dexie o exportar a JSON. */
+    /**
+     * Devuelve un snapshot plano listo para Dexie o exportar a JSON.
+     * @returns {GameStateSnapshot}
+     */
     toJSON() {
         return {
             currentFile:   this.currentFile,
             currentIndex:  this.currentIndex,
+            highWaterMark: this.highWaterMark,
             flags:         { ...this.flags },
             inventory:     [...this.inventory],
             audioSettings: { ...this.audioSettings },
-            highWaterMark: this.highWaterMark,
-            visualState:   {
+            visualState: {
                 bg:      this.visualState.bg,
                 sprites: { ...this.visualState.sprites },
                 mode:    this.visualState.mode,
+                bgm:     this.visualState.bgm ? { ...this.visualState.bgm } : null,
             },
             savedAt:  this.savedAt,
             playTime: this.playTime,
@@ -105,25 +212,29 @@ export class GameState {
     }
 
     /**
-     * Resetea el estado a una partida nueva, conservando las preferencias de audio.
-     * Llamado por Engine.reset() al iniciar Nueva Partida.
+     * Resetea todos los campos narrativos para una partida nueva.
+     * Preserva `audioSettings` — son preferencias del jugador, no del juego.
      */
     reset() {
-        const audio = { ...this.audioSettings }; // conservar preferencias
-        // Re-inicializar todos los campos narrativos
+        const preservedAudioSettings = { ...this.audioSettings };
+
         this.currentFile   = 'inicio.dan';
         this.currentIndex  = 0;
+        this.highWaterMark = 0;
         this.flags         = {};
         this.inventory     = [];
-        this.visualState   = { bg: null, sprites: {}, mode: null };
-        this.highWaterMark = 0;
+        this.visualState   = { bg: null, sprites: {}, mode: null, bgm: null };
         this.savedAt       = null;
         this.playTime      = 0;
-        this.audioSettings = audio; // restaurar preferencias
+        this.audioSettings = preservedAudioSettings;
     }
 
-    /** Crea una instancia de GameState desde un objeto plano (Dexie o JSON importado). */
-    static fromJSON(data) {
-        return new GameState(data);
+    /**
+     * Crea una instancia desde un snapshot plano (Dexie o JSON importado).
+     * @param {GameStateSnapshot} snapshot
+     * @returns {GameState}
+     */
+    static fromJSON(snapshot) {
+        return new GameState(snapshot);
     }
 }

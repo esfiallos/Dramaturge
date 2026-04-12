@@ -1,106 +1,117 @@
 // src/main.js
-// Bootstrap de PRODUCCIÓN.
+// Bootstrap de producción — instancia todos los módulos y arranca el juego.
 
-import { db }             from './core/database/db.js';
-import { seedProductionDB } from './core/database/seed.js';
-import { Dramaturge }    from './core/Engine.js';
-import { KParser }       from './core/parser/Parser.js';
-import { Renderer }      from './modules/Renderer.js';
-import { AudioManager }         from './modules/Audio.js';
-import { GameState }     from './core/State.js';
-import { SaveManager }   from './core/SaveManager.js';
-import { PuzzleSystem }  from './modules/PuzzleSystem.js';
-import { SceneManager }  from './core/SceneManager.js';
-import { MenuSystem }    from './modules/MenuSystem.js';
+import { db }                from './core/database/db.js';
+import { seedProductionDB }  from './core/database/seed.js';
+import { Dramaturge }        from './core/Engine.js';
+import { KParser }           from './core/parser/Parser.js';
+import { Renderer }          from './modules/Renderer.js';
+import { AudioManager }      from './modules/Audio.js';
+import { GameState }         from './core/State.js';
+import { SaveManager }       from './core/SaveManager.js';
+import { PuzzleSystem }      from './modules/PuzzleSystem.js';
+import { SceneManager }      from './core/SceneManager.js';
+import { MenuSystem }        from './modules/MenuSystem.js';
 
-const renderer    = new Renderer();
-const audio       = new AudioManager();
-const parser      = new KParser();
-const state       = new GameState();
-const saveManager = new SaveManager(db);
-const engine      = new Dramaturge(db, renderer, audio, state, saveManager);
+// ─── Instanciación de módulos ─────────────────────────────────────────────────
+
+const renderer     = new Renderer();
+const audio        = new AudioManager();
+const parser       = new KParser();
+const initialState = new GameState();
+const saveManager  = new SaveManager(db);
+const engine       = new Dramaturge(db, renderer, audio, initialState, saveManager);
 const sceneManager = new SceneManager(engine, parser);
+const puzzleSystem = new PuzzleSystem(db, initialState);
 
-// Resolvers inyectados — el Engine no importa estos módulos directamente
-const puzzleSystem = new PuzzleSystem(db, state);
-engine.puzzleResolver = (id)     => puzzleSystem.open(id);
-engine.sceneLoader    = (target, fadeColor) => sceneManager.goto(target, fadeColor);
+// ─── Inyección de callbacks externos ──────────────────────────────────────────
+// El Engine no importa PuzzleSystem ni SceneManager directamente —
+// los recibe como callbacks para evitar dependencias circulares.
 
-// Menú principal — orquesta el flujo completo
+engine.puzzleResolver = (puzzleId)           => puzzleSystem.open(puzzleId);
+engine.sceneLoader    = (target, fadeColor)  => sceneManager.goto(target, fadeColor);
+
+// ─── Menú principal ───────────────────────────────────────────────────────────
+
 const menu = new MenuSystem({
     engine,
     saveManager,
     sceneManager,
     audio,
     startScene:   'cap01/scene_01',
-    gameTitle:    'DRAMATURGE',     // ← cambiar por el título del juego
+    gameTitle:    'DRAMATURGE',
     gameSubtitle: 'Cada secreto tiene su precio',
 });
 
-// ── InputGate — punto de entrada único para todo input del jugador ──────────
+// ─── InputGate ────────────────────────────────────────────────────────────────
+//
+// Punto de entrada único para todo input del jugador (clic y teclado).
 //
 // Garantías:
 //   1. Solo pasa si el estado del menú es IN_GAME
-//   2. No pasa si hay paneles del menú abiertos (slots, audio, modal)
-//   3. Cooldown de 60ms — descarta dobles clicks/teclas del mismo gesto
-//   4. No pasa si click fue sobre un elemento de UI (botón, hud, menú)
+//   2. No pasa si el backlog está abierto
+//   3. No pasa si hay paneles del menú abiertos (slots, audio, modal)
+//   4. Cooldown de 60ms — descarta dobles clicks y rebotes de teclado
 //
-// Engine.next() tiene su propio guard interno (_nextRunning) para re-entrancia
-// en llamadas async, pero este gate es la primera línea de defensa.
+// Engine.next() tiene su propio guard interno (#isAdvancing) para re-entrancia
+// async, pero el InputGate es la primera línea de defensa.
 
-const S = MenuSystem.STATES ?? {};
+const INPUT_COOLDOWN_MS = 60;
+let lastInputTimestamp  = 0;
 
-let _lastInputTs = 0;
-
-function inputGate(fromUI = false) {
-    // Solo en IN_GAME
+function inputGate() {
     if (menu.state !== 'IN_GAME') return;
-
-    // No si hay panel abierto — incluido el backlog
     if (menu.backlogOpen) return;
-    const panelOpen = document.querySelector(
+
+    const panelIsOpen = document.querySelector(
         '#dm-slot-panel:not(.dm-hidden), #dm-audio-panel:not(.dm-hidden), #dm-modal:not(.dm-hidden)'
     );
-    if (panelOpen) return;
+    if (panelIsOpen) return;
 
-    // Cooldown de 60ms (cubre doble-tap y bounce de teclado)
     const now = Date.now();
-    if (now - _lastInputTs < 60) return;
-    _lastInputTs = now;
+    if (now - lastInputTimestamp < INPUT_COOLDOWN_MS) return;
+    lastInputTimestamp = now;
 
     engine.next();
 }
 
 document.getElementById('click-zone')
-    ?.addEventListener('click', (e) => {
-        // Ignorar si el clic fue sobre un botón o elemento de UI
-        if (e.target.closest('button, a, input, #hud, #pause-menu, #main-menu, [id^="dm-"]')) return;
+    ?.addEventListener('click', (clickEvent) => {
+        const clickedOnUiElement = clickEvent.target.closest(
+            'button, a, input, #hud, #pause-menu, #main-menu, [id^="dm-"]'
+        );
+        if (clickedOnUiElement) return;
         inputGate();
     });
 
-document.addEventListener('keydown', (e) => {
-    if (e.code !== 'Space' && e.code !== 'Enter') return;
-    const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON' || tag === 'A') return;
-    e.preventDefault();
+document.addEventListener('keydown', (keyboardEvent) => {
+    if (keyboardEvent.code !== 'Space' && keyboardEvent.code !== 'Enter') return;
+
+    const focusedTag = document.activeElement?.tagName;
+    if (['INPUT', 'TEXTAREA', 'BUTTON', 'A'].includes(focusedTag)) return;
+
+    keyboardEvent.preventDefault();
     inputGate();
 });
 
-async function init() {
-    await renderer.init();
-    await seedProductionDB(db); // no-op si la DB ya tiene datos
-    await menu.init();
-}
+// ─── Service Worker ───────────────────────────────────────────────────────────
+// Solo en producción — en desarrollo interferiría con el HMR de Vite.
 
-init();
-// ── Service Worker — registro PWA ─────────────────────────────────────────────
-// Solo en producción y si el navegador lo soporta.
-// En desarrollo (npm run dev) el SW no se registra para no interferir con HMR.
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
     window.addEventListener('load', () => {
         navigator.serviceWorker
             .register(`${import.meta.env.BASE_URL}sw.js`)
-            .then((reg) => console.log('[SW] Registrado:', reg.scope))
-            .catch((err) => console.warn('[SW] Error al registrar:', err));
+            .then(registration => console.log('[SW] Registrado:', registration.scope))
+            .catch(error      => console.warn('[SW] Error al registrar:', error));
     });
 }
+
+// ─── Arranque ─────────────────────────────────────────────────────────────────
+
+async function initializeGame() {
+    await renderer.init();
+    await seedProductionDB(db);
+    await menu.init();
+}
+
+initializeGame();
