@@ -1,197 +1,250 @@
 // src/core/parser/Parser.js
-//
-// PATRÓN: Table-Driven Parsing
-//
-// Las reglas viven en PARSE_RULES como datos, no como código.
-// El método parse() es un loop genérico que nunca necesita modificarse.
-//
-// PARA AÑADIR UNA REGLA NUEVA:
-//   1. Añadir el regex en Grammar.js
-//   2. Añadir una entrada en PARSE_RULES (aquí abajo)
-//   3. Añadir el case en Engine.js execute()
-//   — parse() no se toca.
 
 import { KDN_GRAMMAR } from './Grammar.js';
 
-// ─── Tabla de reglas ──────────────────────────────────────────────────────────
-//
-// Campos:
-//   regex     {RegExp}   — patrón a matchear contra la línea
-//   type      {string}   — tipo de instrucción que produce
-//   transform {Function} — (opcional) transforma match.groups antes de guardar.
-//                          Si no se define, se usa match.groups directamente.
-//
-// ORDEN: más específico primero.
-//   - INVENTORY_ADD y INVENTORY_REMOVE van antes que SET_FLAG (ambas empiezan con 'set')
-//   - NARRATE va antes que DIALOGUE (no tiene actor:pose, pero el regex no colisiona)
-//   - PUZZLE y GOTO van antes que GOTO para evitar prefijos comunes
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
 
+/**
+ * @typedef {Object} ParseRule
+ * @property {RegExp}                               regex
+ * @property {string}                               type
+ * @property {((groups: Record<string,string>) => Record<string,*>)|undefined} transform
+ */
+
+/**
+ * @typedef {Object} RawInstruction
+ * @property {string} type
+ * @property {number} line
+ */
+
+/**
+ * @typedef {Object} ConditionalFrame
+ * @property {number}  jumpIdx  - Índice en `out` del COND_JUMP o JUMP pendiente
+ * @property {boolean} hasElse  - Si ya se procesó un ELSE para este bloque
+ */
+
+// ─── Tabla de reglas ──────────────────────────────────────────────────────────
+
+/**
+ * Reglas de parseo en orden de aplicación.
+ *
+ * El orden importa — las reglas más específicas van primero:
+ * - INVENTORY_ADD y INVENTORY_REMOVE antes que SET_FLAG (ambas empiezan con `set`)
+ * - NARRATE antes que DIALOGUE (distintos prefijos, no colisionan)
+ *
+ * Para añadir una instrucción nueva: añadir una entrada aquí y el case en Engine.js.
+ *
+ * @type {ParseRule[]}
+ */
 const PARSE_RULES = [
 
-    // ── Personajes ────────────────────────────────────────────────────────────
+    // ── Personajes ─────────────────────────────────────────────────────────
     {
         regex:     KDN_GRAMMAR.PAWN_INSTANTIATE,
         type:      'PAWN_LOAD',
-        transform: (g) => ({ names: g.names.split(',').map(n => n.trim()) }),
+        transform: (groups) => ({ names: groups.names.split(',').map(name => name.trim()) }),
     },
     { regex: KDN_GRAMMAR.SHOW, type: 'SPRITE_SHOW' },
     { regex: KDN_GRAMMAR.HIDE, type: 'SPRITE_HIDE' },
 
-    // ── Diálogo y narración ───────────────────────────────────────────────────
+    // ── Diálogo y narración ────────────────────────────────────────────────
     { regex: KDN_GRAMMAR.DIALOGUE, type: 'DIALOGUE' },
     { regex: KDN_GRAMMAR.NARRATE,  type: 'NARRATE'  },
 
-    // ── Escena y audio ────────────────────────────────────────────────────────
+    // ── Escena y audio ─────────────────────────────────────────────────────
     { regex: KDN_GRAMMAR.BG_COMMAND,    type: 'BG_CHANGE' },
     { regex: KDN_GRAMMAR.AUDIO_COMMAND, type: 'AUDIO'     },
 
-    // ── Control de flujo ──────────────────────────────────────────────────────
+    // ── Control de flujo ───────────────────────────────────────────────────
     { regex: KDN_GRAMMAR.WAIT,   type: 'WAIT'   },
     { regex: KDN_GRAMMAR.PUZZLE, type: 'PUZZLE' },
     { regex: KDN_GRAMMAR.GOTO,   type: 'GOTO'   },
 
-    // ── Estado (orden: más específico primero dentro del grupo 'set') ─────────
+    // ── Efectos de pantalla ────────────────────────────────────────────────
+    { regex: KDN_GRAMMAR.FX_SHAKE,    type: 'FX_SHAKE'    },
+    { regex: KDN_GRAMMAR.FX_FLASH,    type: 'FX_FLASH'    },
+    { regex: KDN_GRAMMAR.FX_VIGNETTE, type: 'FX_VIGNETTE' },
+
+    // ── Estado — más específico primero dentro del grupo `set` ────────────
     { regex: KDN_GRAMMAR.INVENTORY_ADD,    type: 'INVENTORY_ADD'    },
     { regex: KDN_GRAMMAR.INVENTORY_REMOVE, type: 'INVENTORY_REMOVE' },
     { regex: KDN_GRAMMAR.SET_FLAG,         type: 'SET_FLAG'         },
     { regex: KDN_GRAMMAR.UNLOCK,           type: 'UNLOCK'           },
 
-    // ── Efectos de pantalla ──────────────────────────────────────────────────────
-    { regex: KDN_GRAMMAR.FX_SHAKE,    type: 'FX_SHAKE'    },
-    { regex: KDN_GRAMMAR.FX_FLASH,    type: 'FX_FLASH'    },
-    { regex: KDN_GRAMMAR.FX_VIGNETTE, type: 'FX_VIGNETTE' },
-
-    // ── Condicionales (marcadores de bloque — el segundo pase los compila a saltos) ──
+    // ── Condicionales — compilados a saltos en el segundo pase ────────────
     { regex: KDN_GRAMMAR.IF_FLAG,      type: 'IF_FLAG'      },
     { regex: KDN_GRAMMAR.IF_INVENTORY, type: 'IF_INVENTORY' },
     { regex: KDN_GRAMMAR.ELSE,         type: 'ELSE'         },
     { regex: KDN_GRAMMAR.ENDIF,        type: 'ENDIF'        },
 ];
 
-// ─── Parser ───────────────────────────────────────────────────────────────────
+// ─── KParser ──────────────────────────────────────────────────────────────────
 
+/**
+ * Parser Table-Driven para scripts Koedan (.dan).
+ *
+ * Proceso en dos pases:
+ *   1. **Match** — cada línea se compara contra `PARSE_RULES` en orden,
+ *      produciendo un array plano de instrucciones tipadas.
+ *   2. **Resolve** — los marcadores `IF/ELSE/ENDIF` se convierten en
+ *      instrucciones de salto (`COND_JUMP` / `JUMP`) con índices absolutos.
+ *      El Engine ejecuta saltos directamente sin conocer la estructura de bloques.
+ *
+ * Para añadir una instrucción nueva: solo tocar `Grammar.js`, `PARSE_RULES` y `Engine.js`.
+ * Este método `parse()` nunca necesita modificarse.
+ *
+ * @example
+ * const parser = new KParser();
+ * const instructions = parser.parse(rawScriptText);
+ * await engine.loadScript(instructions);
+ */
 export class KParser {
 
+    /**
+     * Parsea un script .dan completo y devuelve el array de instrucciones listo
+     * para ser ejecutado por el Engine.
+     *
+     * @param   {string}            rawScript - Contenido completo del archivo .dan
+     * @returns {RawInstruction[]}
+     */
     parse(rawScript) {
-        const lines = rawScript.trim().split('\n');
-        console.log(`[Parser] Procesando ${lines.length} líneas...`);
+        const scriptLines = rawScript.trim().split('\n');
+        console.log(`[Parser] Procesando ${scriptLines.length} líneas...`);
 
-        // ── Pase 1: matchear cada línea contra las reglas ─────────────────────
-        const raw = [];
-        lines.forEach((line, index) => {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) return;
+        const rawInstructions    = this.#matchAllLines(scriptLines);
+        const compiledInstructions = this.#compileConditionalBlocks(rawInstructions);
 
-            const instruction = this._matchLine(trimmed, index);
-            raw.push(instruction);
+        console.log('[Parser] Árbol generado:', compiledInstructions);
+        return compiledInstructions;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PASE 1 — Match de líneas
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @param   {string[]}          lines
+     * @returns {RawInstruction[]}
+     */
+    #matchAllLines(lines) {
+        const instructions = [];
+
+        lines.forEach((rawLine, lineIndex) => {
+            const trimmedLine = rawLine.trim();
+            if (!trimmedLine || trimmedLine.startsWith('#')) return;
+
+            const instruction = this.#matchSingleLine(trimmedLine, lineIndex);
+            instructions.push(instruction);
 
             if (instruction.type === 'UNKNOWN') {
-                console.warn(`[Parser] Línea ${index + 1} no reconocida: "${trimmed}"`);
+                console.warn(`[Parser] Línea ${lineIndex + 1} no reconocida: "${trimmedLine}"`);
             }
         });
 
-        // ── Pase 2: resolver bloques if/else/endif en saltos con índices ──────
-        const instructions = this._resolveBlocks(raw);
-
-        console.log('[Parser] Árbol generado:', instructions);
         return instructions;
     }
 
     /**
-     * Convierte los marcadores IF/ELSE/ENDIF en instrucciones de salto con
-     * índices precalculados. El engine no necesita saber nada de bloques.
+     * Compara una línea contra todas las reglas en orden.
+     * Devuelve la primera que coincida, o tipo UNKNOWN si ninguna aplica.
      *
-     * IF_FLAG   { condition } → COND_JUMP { condition, targetIndex }
-     *   ... cuerpo del if ...
-     * ELSE                    → JUMP      { targetIndex }
-     *   ... cuerpo del else ...
-     * ENDIF                   → (eliminado)
-     *
-     * Si no hay ELSE:
-     * IF_FLAG   { condition } → COND_JUMP { condition, targetIndex: índice tras ENDIF }
-     *   ... cuerpo ...
-     * ENDIF                   → (eliminado)
-     *
-     * Los bloques pueden anidarse.
+     * @param   {string}          trimmedLine
+     * @param   {number}          lineIndex
+     * @returns {RawInstruction}
      */
-    _resolveBlocks(raw) {
-        const out   = [];
-        const stack = []; // stack de { jumpIndex, hasElse }
-
-        for (let i = 0; i < raw.length; i++) {
-            const inst = raw[i];
-
-            if (inst.type === 'IF_FLAG' || inst.type === 'IF_INVENTORY') {
-                // Emitir COND_JUMP con targetIndex pendiente (se rellena al encontrar ELSE/ENDIF)
-                const jumpInst = {
-                    type:        'COND_JUMP',
-                    condition:   inst,     // instrucción original con key/op/value
-                    targetIndex: -1,       // pendiente
-                    line:        inst.line,
-                };
-                stack.push({ jumpIdx: out.length, hasElse: false });
-                out.push(jumpInst);
-
-            } else if (inst.type === 'ELSE') {
-                const frame = stack[stack.length - 1];
-                if (!frame) {
-                    console.error(`[Parser] ELSE sin IF en línea ${inst.line + 1}`);
-                    continue;
-                }
-                // El COND_JUMP del IF ahora apunta al índice siguiente (tras este JUMP)
-                // Emitir un JUMP incondicional para saltar el cuerpo del else
-                const jumpInst = {
-                    type:        'JUMP',
-                    targetIndex: -1,   // pendiente — se rellena al encontrar ENDIF
-                    line:        inst.line,
-                };
-                // Fijar target del COND_JUMP al índice que tendrá el JUMP + 1
-                out[frame.jumpIdx].targetIndex = out.length + 1;
-                frame.jumpIdx  = out.length; // ahora rastreamos el JUMP del else
-                frame.hasElse  = true;
-                out.push(jumpInst);
-
-            } else if (inst.type === 'ENDIF') {
-                const frame = stack.pop();
-                if (!frame) {
-                    console.error(`[Parser] ENDIF sin IF en línea ${inst.line + 1}`);
-                    continue;
-                }
-                // Fijar el target del último jump pendiente al índice actual (tras endif)
-                out[frame.jumpIdx].targetIndex = out.length;
-                // ENDIF no emite instrucción — se elimina
-
-            } else {
-                out.push(inst);
-            }
-        }
-
-        if (stack.length > 0) {
-            console.error(`[Parser] ${stack.length} bloque(s) if sin cerrar con endif.`);
-        }
-
-        return out;
-    }
-
-    /**
-     * Intenta matchear una línea contra todas las reglas en orden.
-     * Devuelve la instrucción resultante, o tipo UNKNOWN si ninguna aplica.
-     * @param   {string} line  - Línea ya trimmed
-     * @param   {number} index - Número de línea (para debug)
-     * @returns {object}       - Instrucción { type, ...data, line }
-     */
-    _matchLine(line, index) {
+    #matchSingleLine(trimmedLine, lineIndex) {
         for (const rule of PARSE_RULES) {
-            const match = line.match(rule.regex);
+            const match = trimmedLine.match(rule.regex);
             if (!match) continue;
 
-            const data = rule.transform
+            const extractedData = rule.transform
                 ? rule.transform(match.groups)
                 : { ...match.groups };
 
-            return { type: rule.type, ...data, line: index };
+            return { type: rule.type, ...extractedData, line: lineIndex };
         }
 
-        return { type: 'UNKNOWN', raw: line, line: index };
+        return { type: 'UNKNOWN', raw: trimmedLine, line: lineIndex };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PASE 2 — Compilación de bloques condicionales
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Convierte los marcadores `IF/ELSE/ENDIF` en instrucciones de salto
+     * con índices absolutos precalculados.
+     *
+     * Resultado para un bloque `if/else/endif`:
+     *   IF_FLAG   → COND_JUMP { targetIndex: índice del JUMP+1 }
+     *   ...cuerpo del if...
+     *   ELSE      → JUMP      { targetIndex: índice tras ENDIF }
+     *   ...cuerpo del else...
+     *   ENDIF     → (eliminado)
+     *
+     * Resultado para un bloque `if/endif` sin else:
+     *   IF_FLAG   → COND_JUMP { targetIndex: índice tras ENDIF }
+     *   ...cuerpo...
+     *   ENDIF     → (eliminado)
+     *
+     * @param   {RawInstruction[]} rawInstructions
+     * @returns {RawInstruction[]}
+     */
+    #compileConditionalBlocks(rawInstructions) {
+        const compiledOutput       = [];
+        const pendingJumpsStack    = []; // @type {ConditionalFrame[]}
+
+        for (const instruction of rawInstructions) {
+
+            if (instruction.type === 'IF_FLAG' || instruction.type === 'IF_INVENTORY') {
+                const conditionalJump = {
+                    type:        'COND_JUMP',
+                    condition:   instruction,
+                    targetIndex: -1, // se rellena al encontrar ELSE o ENDIF
+                    line:        instruction.line,
+                };
+                pendingJumpsStack.push({ jumpIdx: compiledOutput.length, hasElse: false });
+                compiledOutput.push(conditionalJump);
+
+            } else if (instruction.type === 'ELSE') {
+                const currentFrame = pendingJumpsStack[pendingJumpsStack.length - 1];
+                if (!currentFrame) {
+                    console.error(`[Parser] ELSE sin IF en línea ${instruction.line + 1}`);
+                    continue;
+                }
+
+                const unconditionalJump = {
+                    type:        'JUMP',
+                    targetIndex: -1, // se rellena al encontrar ENDIF
+                    line:        instruction.line,
+                };
+
+                // El COND_JUMP del IF apunta al índice siguiente al JUMP del ELSE
+                compiledOutput[currentFrame.jumpIdx].targetIndex = compiledOutput.length + 1;
+                currentFrame.jumpIdx = compiledOutput.length;
+                currentFrame.hasElse = true;
+                compiledOutput.push(unconditionalJump);
+
+            } else if (instruction.type === 'ENDIF') {
+                const currentFrame = pendingJumpsStack.pop();
+                if (!currentFrame) {
+                    console.error(`[Parser] ENDIF sin IF en línea ${instruction.line + 1}`);
+                    continue;
+                }
+
+                // El último jump pendiente apunta al índice actual (tras el ENDIF)
+                compiledOutput[currentFrame.jumpIdx].targetIndex = compiledOutput.length;
+                // ENDIF no emite instrucción — se elimina del output
+
+            } else {
+                compiledOutput.push(instruction);
+            }
+        }
+
+        if (pendingJumpsStack.length > 0) {
+            console.error(`[Parser] ${pendingJumpsStack.length} bloque(s) if sin cerrar con endif.`);
+        }
+
+        return compiledOutput;
     }
 }

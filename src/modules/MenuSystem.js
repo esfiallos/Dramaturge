@@ -578,7 +578,7 @@ export class MenuSystem {
         this.#hudClockInterval = null;
     }
 
-    // ── Slots ──────────────────────────────────────────────────────────────
+    // ── Slots ─────────────────────────────────────────────────────────────
 
     async #loadAllSlots() {
         await Promise.all(

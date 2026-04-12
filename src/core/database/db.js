@@ -1,24 +1,27 @@
 // src/core/database/db.js
+
 import Dexie from 'dexie';
 
-export const db = new Dexie('DramaturgeDB');
+// ─── DramaturgeDB ─────────────────────────────────────────────────────────────
 
-// ─── CONTRATO DE DATOS ────────────────────────────────────────────────────────
-//
-// REGLAS:
-//   - Solo declarar campos como índice si se van a usar en .where() o .get().
-//   - El resto de los campos se almacenan automáticamente sin declararlos aquí.
-//   - Para agregar tablas nuevas: incrementar la versión y redeclarar TODAS las tablas.
-//     Dexie maneja la migración automáticamente si no se eliminan tablas existentes.
-//
-// TABLA: characters
-//   PK: id (string manual, ej: 'valeria') — permite db.characters.get('valeria') en O(1)
-//
-// TABLA: saves
-//   PK: slotId (string, ej: 'slot_1', 'autosave')
-//   savedAt: timestamp numérico — indexado para ordenar por fecha
-//
-// TABLA: puzzles / inventory — reservadas para uso futuro
+/**
+ * Base de datos local del motor. Usa Dexie v4 sobre IndexedDB.
+ *
+ * Tablas:
+ * - `characters` — actores y sus poses. Gestionado desde `/dev/characters.html`.
+ * - `puzzles`    — definición de puzzles del juego.
+ * - `saves`      — partidas guardadas (autosave + 3 slots manuales).
+ * - `gallery`    — CGs desbloqueados. Meta-progreso: sobrevive a nuevas partidas.
+ *
+ * Regla de migración:
+ *   Nunca modificar una versión ya publicada.
+ *   Siempre añadir `version(N+1)` con el schema completo.
+ *   Dexie aplica la migración automáticamente en el primer arranque.
+ *
+ * Solo se declaran como índices los campos usados en `.where()` o `.get()`.
+ * El resto de los campos se almacenan automáticamente sin declararlos.
+ */
+export const db = new Dexie('DramaturgeDB');
 
 db.version(1).stores({
     characters: 'id, name',
@@ -26,17 +29,13 @@ db.version(1).stores({
     inventory:  'itemKey',
 });
 
-// Versión 2: agrega la tabla de partidas guardadas.
-// Dexie aplica la migración automáticamente en el primer arranque tras la actualización.
 db.version(2).stores({
     characters: 'id, name',
     puzzles:    'puzzleId, type',
     inventory:  'itemKey',
     saves:      'slotId, savedAt',
 });
-// Versión 3: agrega la galería de CGs.
-// id:         identificador del CG (ej: 'cg_01') — clave primaria
-// unlockedAt: timestamp — indexado para ordenar por orden de desbloqueo
+
 db.version(3).stores({
     characters: 'id, name',
     puzzles:    'puzzleId, type',

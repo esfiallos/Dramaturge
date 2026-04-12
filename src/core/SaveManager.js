@@ -1,38 +1,68 @@
 // src/core/SaveManager.js
-//
-// RESPONSABILIDADES:
-//   1. Guardar y cargar partidas en Dexie (persistencia local)
-//   2. Exportar partidas como archivo .json descargable
-//   3. Importar partidas desde un archivo .json
-//
-// SLOTS PREDEFINIDOS:
-//   'autosave'  → guardado automático tras cada diálogo
-//   'slot_1'    → slot manual del jugador (expandible a slot_2, slot_3...)
-//
-// SaveManager NO conoce al Engine ni al Renderer.
-// Solo maneja datos planos (GameState.toJSON()).
 
 import { GameState } from './State.js';
 
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {'autosave' | 'slot_1' | 'slot_2' | 'slot_3'} SaveSlotId
+ */
+
+/**
+ * @typedef {Object} SlotSummary
+ * @property {SaveSlotId} slotId
+ * @property {number}     savedAt
+ * @property {string}     currentFile
+ * @property {number}     currentIndex
+ */
+
+// ─── SaveManager ─────────────────────────────────────────────────────────────
+
+/**
+ * Gestiona la persistencia de partidas en Dexie (IndexedDB).
+ *
+ * Responsabilidades:
+ * - Guardar y cargar `GameState` en slots predefinidos
+ * - Exportar e importar partidas como archivos `.json`
+ * - Eliminar slots individuales
+ *
+ * No conoce al Engine ni al Renderer — opera exclusivamente con
+ * objetos planos (`GameState.toJSON()` / `GameState.fromJSON()`).
+ *
+ * Slots disponibles:
+ * - `autosave` — guardado automático tras cada diálogo
+ * - `slot_1`, `slot_2`, `slot_3` — slots manuales del jugador
+ *
+ * @example
+ * const saveManager = new SaveManager(db);
+ * await saveManager.save(engine.state, 'slot_1');
+ * const restoredState = await saveManager.load('slot_1');
+ */
 export class SaveManager {
+
+    /** @type {import('dexie').Dexie} */
+    db;
+
+    /** @param {import('dexie').Dexie} db */
     constructor(db) {
         this.db = db;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // DEXIE — Persistencia local
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Persistencia en Dexie ──────────────────────────────────────────────
 
     /**
-     * Guarda el estado actual en un slot.
-     * @param {GameState} state  - Estado a guardar
-     * @param {string}    slotId - Identificador del slot (ej: 'autosave', 'slot_1')
+     * Guarda el estado actual en el slot indicado.
+     * Sobrescribe si el slot ya tenía datos.
+     *
+     * @param {GameState}   state
+     * @param {SaveSlotId}  slotId
+     * @returns {Promise<object>} — el snapshot guardado
      */
     async save(state, slotId = 'autosave') {
         const snapshot = {
             slotId,
             ...state.toJSON(),
-            savedAt: Date.now(), // DESPUÉS del spread — gana sobre state.savedAt
+            savedAt: Date.now(), // sobreescribe state.savedAt con el timestamp real
         };
 
         await this.db.saves.put(snapshot);
@@ -41,24 +71,27 @@ export class SaveManager {
     }
 
     /**
-     * Carga un slot y devuelve una instancia de GameState.
-     * @param   {string}          slotId
-     * @returns {GameState|null}
+     * Carga un slot y devuelve una instancia de `GameState`.
+     * Devuelve `null` si el slot está vacío.
+     *
+     * @param   {SaveSlotId}      slotId
+     * @returns {Promise<GameState|null>}
      */
     async load(slotId = 'autosave') {
-        const data = await this.db.saves.get(slotId);
-        if (!data) {
+        const snapshot = await this.db.saves.get(slotId);
+
+        if (!snapshot) {
             console.warn(`[SaveManager] Slot "${slotId}" vacío.`);
             return null;
         }
 
         console.log(`[SaveManager] Cargado desde "${slotId}".`);
-        return GameState.fromJSON(data);
+        return GameState.fromJSON(snapshot);
     }
 
     /**
-     * Devuelve la lista de todos los slots guardados, ordenados por fecha.
-     * @returns {Array<{slotId, savedAt, currentFile, currentIndex}>}
+     * Devuelve un resumen de todos los slots guardados, ordenados por fecha desc.
+     * @returns {Promise<SlotSummary[]>}
      */
     async listSlots() {
         return await this.db.saves
@@ -69,69 +102,68 @@ export class SaveManager {
 
     /**
      * Elimina un slot específico.
-     * @param {string} slotId
+     * @param {SaveSlotId} slotId
      */
     async deleteSlot(slotId) {
         await this.db.saves.delete(slotId);
         console.log(`[SaveManager] Slot "${slotId}" eliminado.`);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // JSON — Exportar e importar partidas
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── Export / Import JSON ───────────────────────────────────────────────
 
     /**
-     * Descarga el estado actual como un archivo .json.
-     * El nombre del archivo incluye la fecha para fácil identificación.
+     * Descarga el estado actual como archivo `.json`.
+     * El nombre incluye la fecha para identificación fácil.
      * @param {GameState} state
      */
     exportToFile(state) {
-        const data     = state.toJSON();
-        const json     = JSON.stringify(data, null, 2);
-        const blob     = new Blob([json], { type: 'application/json' });
-        const url      = URL.createObjectURL(blob);
+        const snapshot      = state.toJSON();
+        const jsonContent   = JSON.stringify(snapshot, null, 2);
+        const exportDate    = new Date().toISOString().slice(0, 10);
+        const downloadName  = `dramaturge_save_${exportDate}.json`;
 
-        const date     = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-        const filename = `dramaturge_save_${date}.json`;
+        const blob         = new Blob([jsonContent], { type: 'application/json' });
+        const downloadUrl  = URL.createObjectURL(blob);
+        const anchorElement = document.createElement('a');
 
-        const a   = document.createElement('a');
-        a.href    = url;
-        a.download = filename;
-        a.click();
+        anchorElement.href     = downloadUrl;
+        anchorElement.download = downloadName;
+        anchorElement.click();
 
-        // Liberar la URL del objeto inmediatamente
-        URL.revokeObjectURL(url);
-        console.log(`[SaveManager] Exportado como "${filename}".`);
+        URL.revokeObjectURL(downloadUrl);
+        console.log(`[SaveManager] Exportado como "${downloadName}".`);
     }
 
     /**
-     * Importa un archivo .json y devuelve una instancia de GameState.
-     * El jugador selecciona el archivo desde su sistema.
+     * Abre un selector de archivo y devuelve el `GameState` importado.
+     * Devuelve `null` si el jugador cancela o el archivo es inválido.
      * @returns {Promise<GameState|null>}
      */
     importFromFile() {
         return new Promise((resolve) => {
-            const input    = document.createElement('input');
-            input.type     = 'file';
-            input.accept   = '.json';
+            const fileInput    = document.createElement('input');
+            fileInput.type     = 'file';
+            fileInput.accept   = '.json';
 
-            input.onchange = async (e) => {
-                const file = e.target.files[0];
-                if (!file) { resolve(null); return; }
+            fileInput.onchange = async (changeEvent) => {
+                const selectedFile = changeEvent.target.files[0];
+                if (!selectedFile) { resolve(null); return; }
 
                 try {
-                    const text  = await file.text();
-                    const data  = JSON.parse(text);
-                    const state = GameState.fromJSON(data);
+                    const fileContent   = await selectedFile.text();
+                    const parsedSnapshot = JSON.parse(fileContent);
+                    const restoredState  = GameState.fromJSON(parsedSnapshot);
+
                     console.log('[SaveManager] Partida importada correctamente.');
-                    resolve(state);
-                } catch (err) {
-                    console.error('[SaveManager] Error al importar:', err.message);
+                    resolve(restoredState);
+
+                } catch (parseError) {
+                    console.error('[SaveManager] Archivo inválido:', parseError.message);
                     resolve(null);
                 }
             };
 
-            input.click();
+            fileInput.click();
         });
     }
 }
