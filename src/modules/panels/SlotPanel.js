@@ -1,5 +1,7 @@
 // src/modules/panels/SlotPanel.js
 
+import { SLOT_CONFIG } from '../../config/slots.js';
+
 /**
  * @typedef {'save' | 'load'} SlotPanelMode
  */
@@ -8,27 +10,29 @@
  * @typedef {Object} SlotData
  * @property {string}      slotId
  * @property {string}      displayName
- * @property {number|null} savedAt       - Timestamp o null si está vacío
- * @property {string|null} currentFile   - Escena guardada o null si está vacío
+ * @property {number|null} savedAt
+ * @property {string|null} currentFile
  */
 
 /**
  * @typedef {Object} SlotPanelEvents
- * @property {(slotId: string) => void} onSaveRequested
- * @property {(slotId: string) => void} onLoadRequested
- * @property {(slotId: string, displayName: string) => void} onDeleteRequested
- * @property {() => void} onClose
+ * @property {(slotId: string) => void}                        onSaveRequested
+ * @property {(slotId: string) => void}                        onLoadRequested
+ * @property {(slotId: string, displayName: string) => void}   onDeleteRequested
+ * @property {() => void}                                      onClose
  */
 
 /**
  * Panel de guardado y carga de partidas.
  *
  * Responsabilidad única: renderizar los slots disponibles y notificar
- * las acciones del jugador mediante callbacks. No ejecuta saves ni loads —
- * solo comunica la intención al orquestador.
+ * las acciones del jugador mediante callbacks. No ejecuta saves ni loads.
+ *
+ * La configuración de qué slots existen viene de `src/config/slots.js`,
+ * no de esta clase — SlotPanel solo sabe cómo renderizarlos.
  *
  * @example
- * const slotPanel = new SlotPanel(availableSlots, {
+ * const slotPanel = new SlotPanel([], {
  *     onSaveRequested:   (slotId) => engine.saveToSlot(slotId),
  *     onLoadRequested:   (slotId) => engine.loadFromSlot(slotId),
  *     onDeleteRequested: (slotId, name) => confirmAndDelete(slotId, name),
@@ -56,15 +60,6 @@ export class SlotPanel {
     /** @type {SlotPanelMode} */
     #currentMode = 'load';
 
-    static #SLOT_IDS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
-
-    static #SLOT_DISPLAY_NAMES = {
-        autosave: 'Autoguardado',
-        slot_1:   'Ranura 1',
-        slot_2:   'Ranura 2',
-        slot_3:   'Ranura 3',
-    };
-
     /**
      * @param {SlotData[]}      availableSlots
      * @param {SlotPanelEvents} events
@@ -86,9 +81,9 @@ export class SlotPanel {
     }
 
     /**
-     * Muestra el panel en el modo indicado y renderiza los slots actuales.
+     * Muestra el panel en el modo indicado con los slots actualizados.
      * @param {SlotPanelMode} mode
-     * @param {SlotData[]}    freshSlots - Estado actualizado de los slots
+     * @param {SlotData[]}    freshSlots
      */
     open(mode, freshSlots) {
         this.#currentMode    = mode;
@@ -103,12 +98,16 @@ export class SlotPanel {
         this.#rootElement.classList.add('dm-hidden');
     }
 
+    /** @returns {boolean} */
+    get isOpen() {
+        return !this.#rootElement.classList.contains('dm-hidden');
+    }
+
     /** @returns {SlotPanelMode} */
     get currentMode() { return this.#currentMode; }
 
     /**
      * Actualiza los datos de los slots sin abrir el panel.
-     * Útil para mantener el estado fresco tras un guardado externo.
      * @param {SlotData[]} freshSlots
      */
     updateSlots(freshSlots) {
@@ -152,40 +151,39 @@ export class SlotPanel {
     #renderSlots() {
         this.#slotListElement.innerHTML = '';
 
+        // El autosave no aparece en el panel de guardado manual
         const visibleSlotIds = this.#currentMode === 'save'
-            ? SlotPanel.#SLOT_IDS.filter(id => id !== 'autosave')
-            : SlotPanel.#SLOT_IDS;
+            ? SLOT_CONFIG.IDS.filter(id => id !== 'autosave')
+            : SLOT_CONFIG.IDS;
 
         for (const slotId of visibleSlotIds) {
             const slotData    = this.#availableSlots.find(s => s.slotId === slotId) ?? null;
-            const displayName = SlotPanel.#SLOT_DISPLAY_NAMES[slotId];
+            const displayName = SLOT_CONFIG.DISPLAY_NAMES[slotId];
             const slotElement = this.#buildSlotElement(slotId, displayName, slotData);
             this.#slotListElement.appendChild(slotElement);
         }
     }
 
     /**
-     * @param {string}       slotId
-     * @param {string}       displayName
+     * @param {string}        slotId
+     * @param {string}        displayName
      * @param {SlotData|null} slotData
      */
     #buildSlotElement(slotId, displayName, slotData) {
-        const isEmpty = slotData === null || slotData.savedAt === null;
+        const isEmpty  = slotData === null || slotData.savedAt === null;
         const slotItem = document.createElement('div');
         slotItem.className = `dm-slot-item${isEmpty ? ' dm-slot-item--empty' : ''}`;
 
-        const nameLabel = this.#buildSlotNameLabel(displayName);
-        const metaLabel = this.#buildSlotMetaLabel(slotData);
-
-        slotItem.append(nameLabel, metaLabel);
+        slotItem.append(
+            this.#buildSlotNameLabel(displayName),
+            this.#buildSlotMetaLabel(slotData),
+        );
 
         if (!isEmpty) {
-            const deleteButton = this.#buildDeleteButton(slotId, displayName);
-            slotItem.appendChild(deleteButton);
+            slotItem.appendChild(this.#buildDeleteButton(slotId, displayName));
         }
 
-        slotItem.addEventListener('click', () =>
-            this.#handleSlotClick(slotId, slotData));
+        slotItem.addEventListener('click', () => this.#handleSlotClick(slotId, slotData));
 
         return slotItem;
     }
@@ -202,9 +200,7 @@ export class SlotPanel {
     #buildSlotMetaLabel(slotData) {
         const label = document.createElement('span');
         label.className   = 'dm-slot-meta';
-        label.textContent = slotData
-            ? this.#formatSaveDate(slotData.savedAt)
-            : 'Vacío';
+        label.textContent = slotData ? this.#formatSaveDate(slotData.savedAt) : 'Vacío';
         return label;
     }
 
@@ -214,8 +210,8 @@ export class SlotPanel {
      */
     #buildDeleteButton(slotId, displayName) {
         const button = document.createElement('button');
-        button.className = 'dm-slot-delete';
-        button.title     = 'Eliminar';
+        button.className   = 'dm-slot-delete';
+        button.title       = 'Eliminar';
         button.textContent = '✕';
         button.addEventListener('click', (clickEvent) => {
             clickEvent.stopPropagation();
@@ -227,7 +223,7 @@ export class SlotPanel {
     // ── Interacción ────────────────────────────────────────────────────────
 
     /**
-     * @param {string}       slotId
+     * @param {string}        slotId
      * @param {SlotData|null} slotData
      */
     #handleSlotClick(slotId, slotData) {

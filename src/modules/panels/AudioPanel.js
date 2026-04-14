@@ -73,6 +73,11 @@ export class AudioPanel {
         this.#rootElement.classList.add('dm-hidden');
     }
 
+    /** @returns {boolean} */
+    get isOpen() {
+        return !this.#rootElement.classList.contains('dm-hidden');
+    }
+
     // ── Construcción del DOM ───────────────────────────────────────────────
 
     #buildRootElement() {

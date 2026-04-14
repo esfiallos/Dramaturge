@@ -21,9 +21,7 @@
  * No accede a la DB directamente — recibe las entradas ya resueltas.
  *
  * @example
- * const galleryPanel = new GalleryPanel({
- *     onClose: () => galleryPanel.hide(),
- * });
+ * const galleryPanel = new GalleryPanel({ onClose: () => galleryPanel.hide() });
  * galleryPanel.mount(document.body);
  * galleryPanel.open(unlockedEntries);
  */
@@ -85,6 +83,11 @@ export class GalleryPanel {
         this.#rootElement.classList.add('dm-hidden');
     }
 
+    /** @returns {boolean} */
+    get isOpen() {
+        return !this.#rootElement.classList.contains('dm-hidden');
+    }
+
     /**
      * Navega el lightbox en la dirección indicada.
      * Llamable desde el teclado en el orquestador.
@@ -92,8 +95,9 @@ export class GalleryPanel {
      */
     navigateLightbox(direction) {
         if (this.#currentEntries.length === 0) return;
-        const lastIndex = this.#currentEntries.length - 1;
-        this.#activeLightboxIndex = (this.#activeLightboxIndex + direction + this.#currentEntries.length) % this.#currentEntries.length;
+        this.#activeLightboxIndex =
+            (this.#activeLightboxIndex + direction + this.#currentEntries.length)
+            % this.#currentEntries.length;
         this.#updateLightboxContent();
     }
 
@@ -142,14 +146,14 @@ export class GalleryPanel {
         this.#lightboxElement = document.createElement('div');
         this.#lightboxElement.className = 'dm-gallery__lightbox dm-hidden';
 
-        const closeButton = this.#buildLightboxButton('dm-gallery__lb-close', '✕',
-            () => this.#closeLightbox());
+        const closeButton = this.#buildLightboxButton(
+            'dm-gallery__lb-close', '✕', () => this.#closeLightbox());
 
-        const prevButton = this.#buildLightboxButton('dm-gallery__lb-prev', '‹',
-            () => this.navigateLightbox(-1));
+        const prevButton = this.#buildLightboxButton(
+            'dm-gallery__lb-prev', '‹', () => this.navigateLightbox(-1));
 
-        const nextButton = this.#buildLightboxButton('dm-gallery__lb-next', '›',
-            () => this.navigateLightbox(1));
+        const nextButton = this.#buildLightboxButton(
+            'dm-gallery__lb-next', '›', () => this.navigateLightbox(1));
 
         this.#lightboxImageElement = document.createElement('img');
         this.#lightboxImageElement.className = 'dm-gallery__lb-img';

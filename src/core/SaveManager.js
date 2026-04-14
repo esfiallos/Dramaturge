@@ -16,7 +16,15 @@ import { GameState } from './State.js';
  * @property {number}     currentIndex
  */
 
-// ─── SaveManager ─────────────────────────────────────────────────────────────
+/**
+ * @typedef {Object} CgEntry
+ * @property {string} id
+ * @property {string} title
+ * @property {string} path
+ * @property {number} unlockedAt
+ */
+
+// ─── SaveManager ──────────────────────────────────────────────────────────────
 
 /**
  * Gestiona la persistencia de partidas en Dexie (IndexedDB).
@@ -25,13 +33,14 @@ import { GameState } from './State.js';
  * - Guardar y cargar `GameState` en slots predefinidos
  * - Exportar e importar partidas como archivos `.json`
  * - Eliminar slots individuales
+ * - Consultar la galería de CGs desbloqueados
  *
  * No conoce al Engine ni al Renderer — opera exclusivamente con
  * objetos planos (`GameState.toJSON()` / `GameState.fromJSON()`).
  *
  * Slots disponibles:
- * - `autosave` — guardado automático tras cada diálogo
- * - `slot_1`, `slot_2`, `slot_3` — slots manuales del jugador
+ * - `autosave`                      — guardado automático tras cada diálogo
+ * - `slot_1`, `slot_2`, `slot_3`   — slots manuales del jugador
  *
  * @example
  * const saveManager = new SaveManager(db);
@@ -41,11 +50,11 @@ import { GameState } from './State.js';
 export class SaveManager {
 
     /** @type {import('dexie').Dexie} */
-    db;
+    #db;
 
     /** @param {import('dexie').Dexie} db */
     constructor(db) {
-        this.db = db;
+        this.#db = db;
     }
 
     // ── Persistencia en Dexie ──────────────────────────────────────────────
@@ -62,10 +71,10 @@ export class SaveManager {
         const snapshot = {
             slotId,
             ...state.toJSON(),
-            savedAt: Date.now(), // sobreescribe state.savedAt con el timestamp real
+            savedAt: Date.now(),
         };
 
-        await this.db.saves.put(snapshot);
+        await this.#db.saves.put(snapshot);
         console.log(`[SaveManager] Guardado en "${slotId}".`);
         return snapshot;
     }
@@ -78,7 +87,7 @@ export class SaveManager {
      * @returns {Promise<GameState|null>}
      */
     async load(slotId = 'autosave') {
-        const snapshot = await this.db.saves.get(slotId);
+        const snapshot = await this.#db.saves.get(slotId);
 
         if (!snapshot) {
             console.warn(`[SaveManager] Slot "${slotId}" vacío.`);
@@ -94,7 +103,7 @@ export class SaveManager {
      * @returns {Promise<SlotSummary[]>}
      */
     async listSlots() {
-        return await this.db.saves
+        return this.#db.saves
             .orderBy('savedAt')
             .reverse()
             .toArray();
@@ -105,8 +114,23 @@ export class SaveManager {
      * @param {SaveSlotId} slotId
      */
     async deleteSlot(slotId) {
-        await this.db.saves.delete(slotId);
+        await this.#db.saves.delete(slotId);
         console.log(`[SaveManager] Slot "${slotId}" eliminado.`);
+    }
+
+    // ── Galería ────────────────────────────────────────────────────────────
+
+    /**
+     * Devuelve todos los CGs desbloqueados, ordenados por fecha de desbloqueo.
+     *
+     * Encapsula el acceso a la tabla `gallery` de IndexedDB. Los módulos
+     * externos no necesitan saber que existe Dexie ni la estructura de la tabla.
+     *
+     * @returns {Promise<CgEntry[]>}
+     */
+    async listUnlockedCGs() {
+        if (!this.#db.gallery) return [];
+        return this.#db.gallery.orderBy('unlockedAt').toArray();
     }
 
     // ── Export / Import JSON ───────────────────────────────────────────────
@@ -122,8 +146,8 @@ export class SaveManager {
         const exportDate    = new Date().toISOString().slice(0, 10);
         const downloadName  = `dramaturge_save_${exportDate}.json`;
 
-        const blob         = new Blob([jsonContent], { type: 'application/json' });
-        const downloadUrl  = URL.createObjectURL(blob);
+        const blob          = new Blob([jsonContent], { type: 'application/json' });
+        const downloadUrl   = URL.createObjectURL(blob);
         const anchorElement = document.createElement('a');
 
         anchorElement.href     = downloadUrl;
@@ -141,16 +165,16 @@ export class SaveManager {
      */
     importFromFile() {
         return new Promise((resolve) => {
-            const fileInput    = document.createElement('input');
-            fileInput.type     = 'file';
-            fileInput.accept   = '.json';
+            const fileInput  = document.createElement('input');
+            fileInput.type   = 'file';
+            fileInput.accept = '.json';
 
             fileInput.onchange = async (changeEvent) => {
                 const selectedFile = changeEvent.target.files[0];
                 if (!selectedFile) { resolve(null); return; }
 
                 try {
-                    const fileContent   = await selectedFile.text();
+                    const fileContent    = await selectedFile.text();
                     const parsedSnapshot = JSON.parse(fileContent);
                     const restoredState  = GameState.fromJSON(parsedSnapshot);
 
