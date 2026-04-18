@@ -1,4 +1,10 @@
 // src/modules/panels/AudioPanel.js
+//
+// RESPONSABILIDAD:
+//   Renderizar sliders de volumen por canal y notificar cambios al orquestador.
+//   No modifica AudioManager directamente — delega en callbacks.
+
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
 
 /**
  * @typedef {Object} AudioChannelConfig
@@ -13,15 +19,12 @@
  * @property {() => void} onClose
  */
 
+// ─── AudioPanel ───────────────────────────────────────────────────────────────
+
 /**
- * Panel de configuración de volúmenes por canal de audio.
- *
- * Responsabilidad única: renderizar los sliders de volumen y notificar
- * cambios al orquestador. No modifica el AudioManager directamente.
- *
  * @example
  * const audioPanel = new AudioPanel({
- *     onVolumeChanged: (channel, volume) => audioManager.setVolume(channel, volume),
+ *     onVolumeChanged: (channel, vol) => engine.updateAudioVolume(channel, vol),
  *     onClose:         () => audioPanel.hide(),
  * });
  * audioPanel.mount(document.body);
@@ -51,26 +54,30 @@ export class AudioPanel {
 
     // ── API pública ────────────────────────────────────────────────────────
 
-    /**
-     * Inserta el panel en el DOM. Llamar una sola vez.
-     * @param {HTMLElement} parentElement
-     */
+    /** Inserta el panel en el DOM. Llamar una sola vez. */
     mount(parentElement) {
         parentElement.appendChild(this.#rootElement);
     }
 
     /**
-     * Muestra el panel con los valores de volumen actuales.
+     * Muestra el panel con los volúmenes actuales.
      * @param {AudioChannelConfig} currentConfig
      */
     open(currentConfig) {
-        this.#syncSlidersToConfig(currentConfig);
+        this.#bgmSlider.valueAsNumber   = Math.round(currentConfig.bgmVolume   * 100);
+        this.#sfxSlider.valueAsNumber   = Math.round(currentConfig.sfxVolume   * 100);
+        this.#voiceSlider.valueAsNumber = Math.round(currentConfig.voiceVolume * 100);
         this.#rootElement.classList.remove('dm-hidden');
     }
 
     /** Oculta el panel sin destruirlo. */
     hide() {
         this.#rootElement.classList.add('dm-hidden');
+    }
+
+    /** @returns {boolean} */
+    get isOpen() {
+        return !this.#rootElement.classList.contains('dm-hidden');
     }
 
     // ── Construcción del DOM ───────────────────────────────────────────────
@@ -90,60 +97,52 @@ export class AudioPanel {
         const bgmRow   = this.#buildVolumeRow('Música',  'bgm');
         const sfxRow   = this.#buildVolumeRow('Efectos', 'se');
         const voiceRow = this.#buildVolumeRow('Voces',   'voice');
-        const backButton = this.#buildBackButton();
 
-        inner.append(title, bgmRow.rowElement, sfxRow.rowElement, voiceRow.rowElement, backButton);
+        this.#bgmSlider   = bgmRow.slider;
+        this.#sfxSlider   = sfxRow.slider;
+        this.#voiceSlider = voiceRow.slider;
+
+        inner.append(
+            title,
+            bgmRow.row,
+            sfxRow.row,
+            voiceRow.row,
+            this.#buildBackButton(),
+        );
         panel.appendChild(inner);
-
-        this.#bgmSlider   = bgmRow.sliderElement;
-        this.#sfxSlider   = sfxRow.sliderElement;
-        this.#voiceSlider = voiceRow.sliderElement;
-
         return panel;
     }
 
     /**
-     * @param {string}                        labelText
-     * @param {'bgm' | 'se' | 'voice'}        channel
-     * @returns {{ rowElement: HTMLElement, sliderElement: HTMLInputElement }}
+     * @param {string}                  label
+     * @param {'bgm' | 'se' | 'voice'} channel
+     * @returns {{ row: HTMLElement, slider: HTMLInputElement }}
      */
-    #buildVolumeRow(labelText, channel) {
-        const rowElement = document.createElement('div');
-        rowElement.className = 'dm-audio-row';
+    #buildVolumeRow(label, channel) {
+        const row = document.createElement('div');
+        row.className = 'dm-audio-row';
 
-        const label = document.createElement('label');
-        label.textContent = labelText;
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
 
-        const sliderElement = document.createElement('input');
-        sliderElement.type  = 'range';
-        sliderElement.min   = '0';
-        sliderElement.max   = '100';
-        sliderElement.value = '50';
-
-        sliderElement.addEventListener('input', () => {
-            const normalizedVolume = sliderElement.valueAsNumber / 100;
-            this.#events.onVolumeChanged(channel, normalizedVolume);
+        const slider = document.createElement('input');
+        slider.type  = 'range';
+        slider.min   = '0';
+        slider.max   = '100';
+        slider.value = '50';
+        slider.addEventListener('input', () => {
+            this.#events.onVolumeChanged(channel, slider.valueAsNumber / 100);
         });
 
-        rowElement.append(label, sliderElement);
-
-        return { rowElement, sliderElement };
+        row.append(lbl, slider);
+        return { row, slider };
     }
 
     #buildBackButton() {
-        const button = document.createElement('button');
-        button.className   = 'btn-gold dm-panel__back';
-        button.textContent = '← Volver';
-        button.addEventListener('click', () => this.#events.onClose());
-        return button;
-    }
-
-    // ── Sincronización ─────────────────────────────────────────────────────
-
-    /** @param {AudioChannelConfig} config */
-    #syncSlidersToConfig(config) {
-        this.#bgmSlider.valueAsNumber   = Math.round(config.bgmVolume   * 100);
-        this.#sfxSlider.valueAsNumber   = Math.round(config.sfxVolume   * 100);
-        this.#voiceSlider.valueAsNumber = Math.round(config.voiceVolume * 100);
+        const btn = document.createElement('button');
+        btn.className   = 'btn-gold dm-panel__back';
+        btn.textContent = '← Volver';
+        btn.addEventListener('click', () => this.#events.onClose());
+        return btn;
     }
 }

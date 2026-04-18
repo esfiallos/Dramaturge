@@ -1,10 +1,11 @@
 // src/modules/MenuSystem.js
 
-import { SlotPanel }    from './panels/SlotPanel..js';
+import { SlotPanel }    from './panels/SlotPanel.js';
 import { AudioPanel }   from './panels/AudioPanel.js';
 import { BacklogPanel } from './panels/Backlogpanel.js';
 import { GalleryPanel } from './panels/Gallerypanel.js';
 import { ModalPanel }   from './panels/Modalpanel.js';
+import { SLOT_CONFIG }  from '../config/slots.js';
 
 /**
  * @typedef {'MAIN_MENU' | 'LOADING' | 'IN_GAME' | 'PAUSED'} MenuState
@@ -15,7 +16,7 @@ import { ModalPanel }   from './panels/Modalpanel.js';
  * @property {import('../core/Engine.js').Dramaturge}         engine
  * @property {import('../core/SaveManager.js').SaveManager}   saveManager
  * @property {import('../core/SceneManager.js').SceneManager} sceneManager
- * @property {import('../modules/Audio.js').AudioManager}     audio
+ * @property {import('./Audio.js').AudioManager}              audio
  * @property {string} startScene
  * @property {string} gameTitle
  * @property {string} gameSubtitle
@@ -47,15 +48,6 @@ export class MenuSystem {
         PAUSED:    'PAUSED',
     });
 
-    static #SLOT_IDS = ['autosave', 'slot_1', 'slot_2', 'slot_3'];
-
-    static #SLOT_DISPLAY_NAMES = {
-        autosave: 'Autoguardado',
-        slot_1:   'Ranura 1',
-        slot_2:   'Ranura 2',
-        slot_3:   'Ranura 3',
-    };
-
     // ── Dependencias ───────────────────────────────────────────────────────
 
     /** @type {import('../core/Engine.js').Dramaturge} */
@@ -67,7 +59,7 @@ export class MenuSystem {
     /** @type {import('../core/SceneManager.js').SceneManager} */
     #sceneManager;
 
-    /** @type {import('../modules/Audio.js').AudioManager} */
+    /** @type {import('./Audio.js').AudioManager} */
     #audio;
 
     // ── Configuración ──────────────────────────────────────────────────────
@@ -112,7 +104,7 @@ export class MenuSystem {
     /** @type {ModalPanel} */
     #modalPanel;
 
-    // ── Elementos estáticos del DOM (existen en index.html) ───────────────
+    // ── Elementos estáticos del DOM ────────────────────────────────────────
 
     /** @type {Record<string, HTMLElement|null>} */
     #staticElements = {};
@@ -186,7 +178,7 @@ export class MenuSystem {
                 this.#staticElements.hud?.classList.add('visible');
                 this.#staticElements.pauseMenu?.classList.add('visible');
                 this.#engine.isBlocked = true;
-                this.#engine.stopModes?.();
+                this.#engine.stopAllReadingModes();
                 this.#staticElements.btnAuto?.classList.remove('hud-btn--active');
                 this.#staticElements.btnSkip?.classList.remove('hud-btn--active');
                 this.#audio.pauseDuck?.();
@@ -240,13 +232,14 @@ export class MenuSystem {
         this.#slotPanel = new SlotPanel([], {
             onSaveRequested:   (slotId) => this.#handleSaveToSlot(slotId),
             onLoadRequested:   (slotId) => this.#handleLoadFromSlot(slotId),
-            onDeleteRequested: (slotId, displayName) => this.#handleDeleteSlot(slotId, displayName),
-            onClose:           () => this.#slotPanel.hide(),
+            onDeleteRequested: (slotId, displayName) =>
+                this.#handleDeleteSlot(slotId, displayName),
+            onClose: () => this.#slotPanel.hide(),
         });
 
         this.#audioPanel = new AudioPanel({
             onVolumeChanged: (channel, volume) => this.#handleVolumeChange(channel, volume),
-            onClose:         () => {
+            onClose: () => {
                 this.#audioPanel.hide();
                 this.#saveManager.save(this.#engine.state, 'autosave').catch(() => {});
             },
@@ -279,42 +272,38 @@ export class MenuSystem {
     }
 
     #bindMainMenuEvents() {
-        const on = (element, handler) => element?.addEventListener('click', handler);
-
-        on(this.#staticElements.btnNewGame, () => this.#startNewGame());
-        on(this.#staticElements.btnGallery, () => this.#openGallery());
-        on(this.#staticElements.btnLoadGame, () => this.#openSlotsForLoading());
+        this.#bindClick(this.#staticElements.btnNewGame,  () => this.#startNewGame());
+        this.#bindClick(this.#staticElements.btnGallery,  () => this.#openGallery());
+        this.#bindClick(this.#staticElements.btnLoadGame, () => this.#openSlotsForLoading());
     }
 
     #bindHudEvents() {
-        const on = (element, handler) => element?.addEventListener('click', handler);
         const states = MenuSystem.STATES;
 
-        on(this.#staticElements.btnBacklog, () => this.#openBacklog());
-        on(this.#staticElements.btnAuto,    () => this.#toggleAutoMode());
-        on(this.#staticElements.btnSkip,    () => this.#triggerSkipMode());
-        on(this.#staticElements.btnSave,    () => this.#openSlotsForSaving());
-        on(this.#staticElements.btnPause,   () => {
+        this.#bindClick(this.#staticElements.btnBacklog, () => this.#openBacklog());
+        this.#bindClick(this.#staticElements.btnAuto,    () => this.#toggleAutoMode());
+        this.#bindClick(this.#staticElements.btnSkip,    () => this.#triggerSkipMode());
+        this.#bindClick(this.#staticElements.btnSave,    () => this.#openSlotsForSaving());
+        this.#bindClick(this.#staticElements.btnPause,   () => {
             if (this.#currentState === states.IN_GAME) {
                 this.#transitionToState(states.PAUSED);
             }
         });
-        on(this.#staticElements.btnExit, () => this.#exitToMainMenuWithAutosave());
+        this.#bindClick(this.#staticElements.btnExit, () => this.#exitToMainMenuWithAutosave());
     }
 
     #bindPauseMenuEvents() {
-        const on = (element, handler) => element?.addEventListener('click', handler);
         const states = MenuSystem.STATES;
 
-        on(this.#staticElements.btnResume, () => {
+        this.#bindClick(this.#staticElements.btnResume, () => {
             if (this.#currentState === states.PAUSED) {
                 this.#transitionToState(states.IN_GAME);
             }
         });
-        on(this.#staticElements.btnSaveSlot,  () => this.#openSlotsForSaving());
-        on(this.#staticElements.btnLoadSlot,  () => this.#openSlotsForLoading());
-        on(this.#staticElements.btnSettings,  () => this.#openAudioPanel());
-        on(this.#staticElements.btnMainMenu,  () => this.#confirmExitToMainMenu());
+        this.#bindClick(this.#staticElements.btnSaveSlot, () => this.#openSlotsForSaving());
+        this.#bindClick(this.#staticElements.btnLoadSlot, () => this.#openSlotsForLoading());
+        this.#bindClick(this.#staticElements.btnSettings, () => this.#openAudioPanel());
+        this.#bindClick(this.#staticElements.btnMainMenu, () => this.#confirmExitToMainMenu());
     }
 
     #bindKeyboardEvents() {
@@ -323,16 +312,48 @@ export class MenuSystem {
         });
     }
 
+    /**
+     * Registra un handler de clic de forma segura.
+     * El optional chaining protege contra elementos ausentes en el HTML.
+     *
+     * @param {HTMLElement|null|undefined} element
+     * @param {() => void}                handler
+     */
+    #bindClick(element, handler) {
+        element?.addEventListener('click', handler);
+    }
+
     /** @param {KeyboardEvent} keyboardEvent */
     #handleKeyboardInput(keyboardEvent) {
-        if (keyboardEvent.key === 'Escape')      { this.#handleEscapeKey();       return; }
-        if (keyboardEvent.key === 'ArrowLeft')   { this.#galleryPanel.navigateLightbox(-1); return; }
-        if (keyboardEvent.key === 'ArrowRight')  { this.#galleryPanel.navigateLightbox(1);  return; }
+        if (keyboardEvent.key === 'Escape')     { this.#handleEscapeKey();                 return; }
+        if (keyboardEvent.key === 'ArrowLeft')  { this.#galleryPanel.navigateLightbox(-1); return; }
+        if (keyboardEvent.key === 'ArrowRight') { this.#galleryPanel.navigateLightbox(1);  return; }
         if (keyboardEvent.key === 'l' || keyboardEvent.key === 'L') {
             this.#backlogPanel.isOpen
                 ? this.#backlogPanel.hide()
                 : this.#openBacklog();
         }
+    }
+
+    // ── Tecla Escape ───────────────────────────────────────────────────────
+
+    /**
+     * Cierra paneles en orden de prioridad visual (el más encima primero).
+     * Cada panel expone isOpen, sin dependencias en IDs del DOM.
+     */
+    #handleEscapeKey() {
+        const states = MenuSystem.STATES;
+
+        if (this.#galleryPanel.isOpen)               { this.#galleryPanel.hide(); return; }
+        if (this.#backlogPanel.isOpen)               { this.#backlogPanel.hide(); return; }
+        if (this.#currentState === states.MAIN_MENU) return;
+        if (this.#currentState === states.LOADING)   return;
+        if (this.#modalPanel.isOpen)                 { this.#modalPanel.hide();   return; }
+        if (this.#audioPanel.isOpen)                 { this.#audioPanel.hide();   return; }
+        if (this.#slotPanel.isOpen)                  { this.#slotPanel.hide();    return; }
+
+        if (this.#currentState === states.PAUSED)  { this.#transitionToState(states.IN_GAME); return; }
+        if (this.#currentState === states.IN_GAME) { this.#transitionToState(states.PAUSED);  return; }
     }
 
     // ── Acciones principales ───────────────────────────────────────────────
@@ -369,15 +390,18 @@ export class MenuSystem {
         this.#slotPanel.open('load', this.#buildSlotDataArray());
     }
 
+    /**
+     * Abre la galería de CGs.
+     * Delega la consulta a SaveManager — no accede a la DB directamente.
+     */
     async #openGallery() {
-        const unlockedEntries = await this.#saveManager.db.gallery
-            ?.orderBy('unlockedAt').toArray() ?? [];
+        const unlockedEntries = await this.#saveManager.listUnlockedCGs();
         this.#galleryPanel.open(unlockedEntries);
     }
 
     #openBacklog() {
         if (this.#currentState !== MenuSystem.STATES.IN_GAME) return;
-        this.#backlogPanel.open(this.#engine.backlog ?? []);
+        this.#backlogPanel.open(this.#engine.backlog);
     }
 
     #openAudioPanel() {
@@ -411,7 +435,7 @@ export class MenuSystem {
 
     /** @param {string} slotId */
     async #handleSaveToSlot(slotId) {
-        const slotDisplayName    = MenuSystem.#SLOT_DISPLAY_NAMES[slotId];
+        const slotDisplayName    = SLOT_CONFIG.DISPLAY_NAMES[slotId];
         const slotAlreadyHasData = this.#cachedSlots[slotId] !== null;
 
         if (slotAlreadyHasData) {
@@ -491,43 +515,20 @@ export class MenuSystem {
     // ── Modos de lectura ───────────────────────────────────────────────────
 
     #toggleAutoMode() {
-        const autoIsNowActive = this.#engine.toggleAuto();
+        const autoIsNowActive = this.#engine.toggleAutoMode();
         this.#staticElements.btnAuto?.classList.toggle('hud-btn--active', autoIsNowActive);
         this.#staticElements.btnSkip?.classList.remove('hud-btn--active');
     }
 
     #triggerSkipMode() {
-        const skipButton    = this.#staticElements.btnSkip;
-        const skipIsNowActive = this.#engine.triggerSkip(() => {
+        const skipButton      = this.#staticElements.btnSkip;
+        const skipIsNowActive = this.#engine.triggerSkipMode(() => {
             skipButton?.classList.remove('hud-btn--active');
         });
         skipButton?.classList.toggle('hud-btn--active', skipIsNowActive);
         if (skipIsNowActive) {
             this.#staticElements.btnAuto?.classList.remove('hud-btn--active');
         }
-    }
-
-    // ── Tecla Escape ──────────────────────────────────────────────────────
-
-    #handleEscapeKey() {
-        const states = MenuSystem.STATES;
-
-        if (this.#galleryPanel.isOpen ?? false) { this.#galleryPanel.hide();  return; }
-        if (this.#backlogPanel.isOpen)          { this.#backlogPanel.hide();  return; }
-        if (this.#currentState === states.MAIN_MENU) return;
-        if (this.#currentState === states.LOADING)   return;
-        if (this.#modalPanel.isOpen)            { this.#modalPanel.hide();    return; }
-
-        const audioIsOpen = !document.getElementById('dm-audio-panel')
-            ?.classList.contains('dm-hidden');
-        if (audioIsOpen) { this.#audioPanel.hide(); return; }
-
-        const slotIsOpen = !document.getElementById('dm-slot-panel')
-            ?.classList.contains('dm-hidden');
-        if (slotIsOpen) { this.#slotPanel.hide(); return; }
-
-        if (this.#currentState === states.PAUSED)  { this.#transitionToState(states.IN_GAME); return; }
-        if (this.#currentState === states.IN_GAME) { this.#transitionToState(states.PAUSED);  return; }
     }
 
     // ── HUD ────────────────────────────────────────────────────────────────
@@ -537,11 +538,13 @@ export class MenuSystem {
             this.#staticElements.hudTitle.textContent = this.#gameTitle;
         }
 
-        const currentSceneFile  = this.#engine.state.currentFile ?? '';
+        const currentSceneFile   = this.#engine.state.currentFile ?? '';
         const formattedSceneName = currentSceneFile
             .replace('.dan', '')
             .split('/')
-            .map(segment => segment.replace(/_/g, ' ').replace(/\w/g, char => char.toUpperCase()))
+            .map(segment => segment
+                .replace(/_/g, ' ')
+                .replace(/\w/g, char => char.toUpperCase()))
             .join(' · ');
 
         if (this.#staticElements.hudScene) {
@@ -554,13 +557,15 @@ export class MenuSystem {
         this.#hudClockInterval = setInterval(() => {
             if (this.#currentState !== MenuSystem.STATES.IN_GAME) return;
 
-            const accumulatedPlaytime = (this.#engine.state.playTime ?? 0) +
-                Math.floor((Date.now() - (this.#engine._sessionStart ?? Date.now())) / 1000);
+            // sessionElapsedMs acumula solo la sesión actual.
+            // state.playTime acumula las sesiones anteriores.
+            const totalPlaytimeSeconds = (this.#engine.state.playTime ?? 0) +
+                Math.floor(this.#engine.sessionElapsedMs / 1000);
 
-            const hours   = Math.floor(accumulatedPlaytime / 3600);
-            const minutes = Math.floor((accumulatedPlaytime % 3600) / 60)
+            const hours   = Math.floor(totalPlaytimeSeconds / 3600);
+            const minutes = Math.floor((totalPlaytimeSeconds % 3600) / 60)
                 .toString().padStart(2, '0');
-            const seconds = (accumulatedPlaytime % 60)
+            const seconds = (totalPlaytimeSeconds % 60)
                 .toString().padStart(2, '0');
 
             const formattedTime = hours > 0
@@ -582,7 +587,7 @@ export class MenuSystem {
 
     async #loadAllSlots() {
         await Promise.all(
-            MenuSystem.#SLOT_IDS.map(async (slotId) => {
+            SLOT_CONFIG.IDS.map(async (slotId) => {
                 this.#cachedSlots[slotId] = await this.#saveManager.load(slotId);
             })
         );
@@ -591,16 +596,16 @@ export class MenuSystem {
 
     /** @returns {SlotRecord[]} */
     #buildSlotDataArray() {
-    return MenuSystem.#SLOT_IDS.map(slotId => {
-        const cachedSlot = this.#cachedSlots[slotId];
-        return {
-            slotId,
-            displayName: MenuSystem.#SLOT_DISPLAY_NAMES[slotId],
-            savedAt:     cachedSlot?.savedAt     ?? null,
-            currentFile: cachedSlot?.currentFile ?? null,
-        };
-    });
-}
+        return SLOT_CONFIG.IDS.map(slotId => {
+            const cachedSlot = this.#cachedSlots[slotId];
+            return {
+                slotId,
+                displayName: SLOT_CONFIG.DISPLAY_NAMES[slotId],
+                savedAt:     cachedSlot?.savedAt     ?? null,
+                currentFile: cachedSlot?.currentFile ?? null,
+            };
+        });
+    }
 
     #refreshMainMenuButtonStates() {
         const anySlotHasData = Object.values(this.#cachedSlots).some(Boolean);

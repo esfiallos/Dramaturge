@@ -1,203 +1,269 @@
 // src/modules/Renderer.js
 //
 // ARQUITECTURA DE CAPAS:
-//   [PIXI Canvas]  → fondos y sprites (z-index: 5)
-//   [DOM Overlay]  → textbox, nombre, UI (z-index: 30+)
+//   [PixiJS canvas]  → fondos y sprites        (z-index 5)
+//   [DOM overlay]    → textbox, nombre, UI      (z-index 30+)
 //
-// CICLO DE VIDA OBLIGATORIO (PixiJS v8):
-//   const renderer = new MERenderer();
-//   await renderer.init();            ← debe llamarse antes de cualquier otro método
+// CICLO DE VIDA OBLIGATORIO:
+//   const renderer = new Renderer();
+//   await renderer.init();   ← llamar antes que cualquier otro método
+//
+// API PÚBLICA HACIA ENGINE:
+//   activateInstantMode()   → Engine lo llama antes de texto en modo skip
+//   get isSkipLocked        → Engine lo consulta para proteger el avance
+//   applyNarrationMode(on)  → Engine lo llama al restaurar estado desde save
+//
+// CONVENCIÓN DE CAMPOS:
+//   #campo              → completamente privado, no accesible desde fuera
+//   campo (sin #)       → público — Engine lo necesita directamente
+//                         (nameEl, textEl, textBox, transition, activeSprites,
+//                          bgCurrent, app, isTransitioning)
 
 import { Application, Assets, Sprite, Container } from 'pixi.js';
 
-// ─── Constantes de configuración ─────────────────────────────────────────────
+// ─── Constantes ───────────────────────────────────────────────────────────────
 
-const SLOT_X   = { left: 0.20, center: 0.50, right: 0.80 };
+/** Posición X normalizada (0–1) de cada slot de sprite. */
+const SLOT_X = Object.freeze({ left: 0.20, center: 0.50, right: 0.80 });
 
-// Formatos de imagen soportados en orden de preferencia.
-// Si el path ya tiene extensión conocida, se usa directamente.
-// Si no, se prueban en orden hasta que uno cargue.
+/** Formatos probados en orden de preferencia al cargar imágenes. */
 const IMAGE_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 
+/** Altura máxima de un sprite como fracción de la pantalla. */
+const SPRITE_HEIGHT_RATIO = 0.82;
+
+/** Duración por defecto de fades en ms. */
+const FADE_MS = 500;
+
+/** Ms entre caracteres en el typewriter. */
+const TYPEWRITER_CHAR_MS = 28;
+
+// ─── Helpers de módulo ────────────────────────────────────────────────────────
+
 /**
- * Carga una textura probando múltiples formatos si el path no tiene extensión.
- * @param   {string}  path - Puede tener extensión ('v_idle.webp') o no ('v_idle')
- * @returns {Promise<Texture|null>}
- */
-/**
- * Carga una textura probando todos los formatos en orden.
+ * Carga una textura probando formatos en orden de preferencia.
+ * Si el path ya tiene extensión conocida, la intenta primero.
  *
- * PixiJS Assets necesita la extensión en la URL para seleccionar el parser
- * correcto — sin ella lanza un warning y falla. Por eso siempre probamos
- * con extensión explícita.
- *
- * Estrategia:
- *   1. Si el path ya tiene extensión conocida → intentarla primero.
- *   2. Probar el resto de formatos con la ruta base (sin extensión).
- *
- * Así funciona tanto con 'v_idle.webp' como con 'v_idle' o 'forest.jpg'.
+ * @param   {string} path — con o sin extensión ('v_idle.webp' | 'v_idle')
+ * @returns {Promise<import('pixi.js').Texture|null>}
  */
 async function loadTexture(path) {
-    // Obtener la ruta base (sin extensión si la tiene)
-    const ext  = IMAGE_FORMATS.find(f => path.toLowerCase().endsWith(`.${f}`));
-    const base = ext ? path.slice(0, -(ext.length + 1)) : path;
-
-    // Orden de intento: extensión original primero (si existe), luego las demás
-    const order = ext
-        ? [ext, ...IMAGE_FORMATS.filter(f => f !== ext)]
+    const existingExt = IMAGE_FORMATS.find(f => path.toLowerCase().endsWith(`.${f}`));
+    const base        = existingExt ? path.slice(0, -(existingExt.length + 1)) : path;
+    const order       = existingExt
+        ? [existingExt, ...IMAGE_FORMATS.filter(f => f !== existingExt)]
         : IMAGE_FORMATS;
 
     for (const fmt of order) {
-        try {
-            return await Assets.load(`${base}.${fmt}`);
-        } catch { /* continuar con el siguiente */ }
+        try { return await Assets.load(`${base}.${fmt}`); }
+        catch { /* continuar con el siguiente */ }
     }
     return null;
 }
-const SPRITE_HEIGHT_RATIO = 0.82;
-const FADE_MS             = 500;
-const TW_SPEED            = 28;
 
-// ─── Clase principal ──────────────────────────────────────────────────────────
+// ─── Renderer ─────────────────────────────────────────────────────────────────
 
 export class Renderer {
 
-    constructor() {
-        // El constructor es SÍNCRONO.
-        // PixiJS v8 requiere que las opciones se pasen a init(), no al constructor.
-        this.app = new Application();
+    // ── PixiJS — públicos (Engine y SceneManager los necesitan) ───────────
 
-        // Referencias DOM — disponibles de inmediato, antes de init()
-        this.nameEl  = document.getElementById('char-name');
-        this.textEl  = document.getElementById('char-text');
+    /** @type {import('pixi.js').Application} */
+    app;
+
+    /** @type {import('pixi.js').Container} */
+    bgLayer;
+
+    /** @type {import('pixi.js').Container} */
+    spriteLayer;
+
+    /** @type {import('pixi.js').Sprite|null} */
+    bgCurrent = null;
+
+    /** @type {Map<string, import('pixi.js').Sprite>} — actorId → sprite activo */
+    activeSprites;
+
+    // ── DOM — públicos (Engine actualiza textbox directamente) ────────────
+
+    /** @type {HTMLElement} */ nameEl;
+    /** @type {HTMLElement} */ textEl;
+    /** @type {HTMLElement} */ textBox;
+    /** @type {HTMLElement} */ transition;
+
+    // ── Estado de transición — público (Engine lo respeta en next()) ──────
+
+    /**
+     * True mientras se ejecuta una transición de modo (narración ↔ diálogo).
+     * Engine no procesa input mientras sea true.
+     * @type {boolean}
+     */
+    isTransitioning = false;
+
+    // ── Typewriter — privado ───────────────────────────────────────────────
+
+    /** @type {number|null} — handle del rAF activo */
+    #twRafId = null;
+
+    /** @type {string} */
+    #twFullText = '';
+
+    /** @type {Function|null} */
+    #twCallback = null;
+
+    /** @type {boolean} */
+    #twComplete = false;
+
+    // ── Modos de avance — privados, expuestos por API ─────────────────────
+
+    /**
+     * Cuando está activo, el próximo typewriter completa en un frame.
+     * Activar via activateInstantMode(). Se consume automáticamente.
+     * @type {boolean}
+     */
+    #instantModeActive = false;
+
+    /**
+     * Bloqueo post-skip: protege contra avance involuntario tras completar
+     * texto por skip. Leer via getter isSkipLocked.
+     * @type {boolean}
+     */
+    #skipLocked = false;
+
+    // ── Elementos DOM internos (creados en init()) ────────────────────────
+
+    /** @type {HTMLElement|null} */
+    #advanceIndicator = null;
+
+    constructor() {
+        this.app          = new Application();
+        this.activeSprites = new Map();
+        this.nameEl     = document.getElementById('char-name');
+        this.textEl     = document.getElementById('char-text');
         this.textBox    = document.getElementById('text-box');
         this.transition = document.getElementById('scene-transition');
-
-        // Estado interno
-        this.activeSprites = new Map();
-        this.bgCurrent     = null;
-
-        // Estado del typewriter
-        this._twRafId    = null;   // handle de rAF activo
-        this._twFullText = '';
-        this._twOnDone   = null;
-        this._twDone     = false;
-
-        // Bloqueo durante transición de modo — el Engine lo respeta en next()
-        this.isTransitioning = false;
-
-        // Cuando true, el typewriter completa el texto instantáneamente (modo skip).
-        // El Engine lo activa antes de llamar typewriter(); se limpia solo después.
-        this._instantText = false;
-
-        // Lock post-skip: evita que un doble clic rápido salte el texto recién completado
-        this._skipLocked = false;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // INICIALIZACIÓN (async — llamar una sola vez desde main.js)
+    // INICIALIZACIÓN
     // ─────────────────────────────────────────────────────────────────────────
 
     async init() {
         const viewport = document.getElementById('viewport');
 
-        // v8: opciones en init(), no en el constructor
         await this.app.init({
-            resizeTo:   viewport,
-            background: 0x000000,
-            antialias:  true,
+            resizeTo:    viewport,
+            background:  0x000000,
+            antialias:   true,
             autoDensity: true,
-            resolution: window.devicePixelRatio || 1,
+            resolution:  window.devicePixelRatio || 1,
         });
 
-        // v8: app.canvas reemplaza al deprecado app.view
         const canvas = this.app.canvas;
         canvas.style.cssText = 'position:absolute;inset:0;z-index:5;';
 
-        const clickZone = viewport.querySelector('#click-zone');
-        viewport.insertBefore(canvas, clickZone);
+        viewport.insertBefore(canvas, viewport.querySelector('#click-zone'));
 
         this.bgLayer     = new Container();
         this.spriteLayer = new Container();
         this.app.stage.addChild(this.bgLayer, this.spriteLayer);
 
-        this.app.renderer.on('resize', () => this._onResize());
+        this.app.renderer.on('resize', () => this.#onResize());
 
-        // ── Indicador de avance ───────────────────────────────────────────
-        // Triángulo parpadeante que aparece cuando el typewriter termina
-        this._advanceEl = document.createElement('span');
-        this._advanceEl.id = 'advance-indicator';
-        this._advanceEl.textContent = '▼';
-        this.textBox?.appendChild(this._advanceEl);
-
-        // Capa de fade DOM — cubre todo el viewport para transiciones
-        // de escena (goto fade:black / fade:white)
-        this._fadeLayer = document.createElement('div');
-        this._fadeLayer.style.cssText = [
-            'position:absolute', 'inset:0', 'z-index:25',
-            'pointer-events:none', 'opacity:0',
-            'transition:opacity 0ms linear',
-            'background:#000',
-        ].join(';');
-        viewport.appendChild(this._fadeLayer);
+        this.#advanceIndicator = document.createElement('span');
+        this.#advanceIndicator.id          = 'advance-indicator';
+        this.#advanceIndicator.textContent = '▼';
+        this.textBox?.appendChild(this.#advanceIndicator);
 
         console.log('[Renderer] PixiJS v8 inicializado.');
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // API PÚBLICA — modos de avance
+    // (contrato con Engine — no acceder a los campos # directamente)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Activa el modo de texto instantáneo para la próxima llamada a typewriter().
+     * Engine lo llama antes de instrucciones de texto en modo skip.
+     * Se consume automáticamente — no persiste más de un uso.
+     */
+    activateInstantMode() {
+        this.#instantModeActive = true;
+    }
+
+    /**
+     * True si el skip-lock está activo. Engine lo consulta para ignorar
+     * el input durante el breve periodo de protección post-skip.
+     * @returns {boolean}
+     */
+    get isSkipLocked() {
+        return this.#skipLocked;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // SPRITES
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * @param {string} actor
+     * @param {string} path
+     * @param {string} slot   — 'left' | 'center' | 'right'
+     * @param {string} effect — 'fade' | 'slide' | cualquier otro = instantáneo
+     */
     async renderSprite(actor, path, slot, effect = 'fade') {
-        this._destroySprite(actor);
+        this.#destroySprite(actor);
 
         const texture = await loadTexture(path);
         if (!texture) {
-            console.warn(`[Renderer] Sprite no encontrado en ningún formato: ${path}`);
+            console.warn(`[Renderer] Sprite no encontrado: ${path}`);
             return;
         }
 
-        const sprite  = new Sprite(texture);
-        sprite._dramSlot = slot; // guardado para _onResize
-
-        this._positionSprite(sprite, slot);
+        const sprite     = new Sprite(texture);
+        sprite._dramSlot = slot;
+        this.#positionSprite(sprite, slot);
         sprite.alpha = 0;
         this.spriteLayer.addChild(sprite);
         this.activeSprites.set(actor, sprite);
 
         if (effect === 'fade') {
-            await this._fadeIn(sprite);
+            await this.#fadeIn(sprite);
         } else if (effect === 'slide') {
             sprite.y += 50;
             await Promise.all([
-                this._fadeIn(sprite),
-                this._moveTo(sprite, sprite.x, sprite.y - 50),
+                this.#fadeIn(sprite),
+                this.#moveTo(sprite, sprite.x, sprite.y - 50),
             ]);
         } else {
             sprite.alpha = 1;
         }
     }
 
+    /**
+     * @param {string} actor
+     * @param {string} slot
+     * @param {string} [effect]
+     */
     async hideSprite(actor, slot, effect = 'fade') {
         const sprite = this.activeSprites.get(actor);
         if (!sprite) return;
-
-        if (effect === 'fade') await this._fadeOut(sprite);
-        this._destroySprite(actor);
+        if (effect === 'fade') await this.#fadeOut(sprite);
+        this.#destroySprite(actor);
     }
 
+    /**
+     * Cambia la textura del sprite activo de un actor (cambio de pose).
+     * @param {string} actor
+     * @param {string} path
+     */
     async updateSprite(actor, path) {
         const sprite = this.activeSprites.get(actor);
         if (!sprite) return;
 
         const texture = await loadTexture(path);
-        if (!texture) {
-            console.warn(`[Renderer] Sprite no encontrado en updateSprite: ${path}`);
-            return;
-        }
-        sprite.texture = texture;
+        if (!texture) { console.warn(`[Renderer] updateSprite: no encontrado ${path}`); return; }
 
-        const targetH = this.app.screen.height * SPRITE_HEIGHT_RATIO;
+        sprite.texture = texture;
+        const targetH  = this.app.screen.height * SPRITE_HEIGHT_RATIO;
         sprite.scale.set(targetH / sprite.texture.height);
     }
 
@@ -205,294 +271,157 @@ export class Renderer {
     // FONDO
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * @param {string}        target  — nombre sin extensión en /assets/bg/
+     * @param {string}        [effect]
+     * @param {string|number} [time]
+     */
     async changeBackground(target, effect = 'fade', time = '1s') {
-        const durationMs = this._parseTime(time);
-        const path       = `${import.meta.env.BASE_URL}assets/bg/${target}`; // sin extensión: loadTexture prueba webp→png→jpg
-
+        const ms      = this.#parseTime(time);
+        const path    = `${import.meta.env.BASE_URL}assets/bg/${target}`;
         const texture = await loadTexture(path);
+
         if (!texture) {
-            console.warn(`[Renderer] Fondo no encontrado en ningún formato: ${path}`);
+            console.warn(`[Renderer] Fondo no encontrado: ${path}`);
             return;
         }
 
-        const newBg  = new Sprite(texture);
-        newBg.alpha  = 0;
-        newBg.width  = this.app.screen.width;
-        newBg.height = this.app.screen.height;
+        const newBg    = new Sprite(texture);
+        newBg.alpha    = 0;
+        newBg.width    = this.app.screen.width;
+        newBg.height   = this.app.screen.height;
         this.bgLayer.addChild(newBg);
 
-        if (effect === 'fade') {
-            await this._fadeIn(newBg, durationMs);
-        } else {
-            newBg.alpha = 1;
-        }
+        if (effect === 'fade') await this.#fadeIn(newBg, ms);
+        else newBg.alpha = 1;
 
         if (this.bgCurrent) this.bgCurrent.destroy();
         this.bgCurrent = newBg;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // DIÁLOGO / TYPEWRITER
+    // TYPEWRITER
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Inicia el efecto typewriter.
-     * Ahora es async — espera el crossfade de narración antes de empezar a escribir.
-     * El engine debe hacer: await renderer.typewriter(...)
+     * Inicia el efecto typewriter para una línea de texto.
+     *
+     * @param {string|null} name   — nombre del personaje, o null para narración
+     * @param {string}      text   — texto completo a escribir
+     * @param {Function}    onDone — llamado cuando el jugador puede avanzar
      */
     async typewriter(name, text, onDone) {
-        this._twFullText = text;
-        this._twOnDone   = onDone;
-        this._twDone     = false;
-        this._skipLocked = false;
+        this.#twFullText = text;
+        this.#twCallback = onDone;
+        this.#twComplete = false;
+        this.#skipLocked  = false;
 
         const isNarration = !name;
-
-        // Ocultar indicador mientras escribe
-        this._setAdvance(false);
-
-        // Limpiar texto ANTES del crossfade — _setNarrationMode hace fade out
-        // primero (opacity 0), así el swap ocurre mientras la caja es invisible.
-        // Cubre todos los casos: diálogo→narrador, narrador→diálogo, puzzle→narrador, etc.
+        this.#setAdvance(false);
         this.nameEl.innerText = '';
         this.textEl.innerText = '';
 
-        await this._setNarrationMode(isNarration);
-
-        // Nombre se fija después del crossfade, justo antes de empezar a escribir
+        await this.applyNarrationMode(isNarration);
         this.nameEl.innerText = isNarration ? '' : name;
 
-        // Modo skip: completar texto sin animación (un solo frame)
-        if (this._instantText) {
-            this._instantText    = false; // consumir el flag
-            this.textEl.innerText = text;
-            this._twDone          = true;
-            this._setAdvance(false); // en skip no mostramos el ▼
-            this._twOnDone?.();
+        // Modo instantáneo (skip): completar sin animación
+        if (this.#instantModeActive) {
+            this.#instantModeActive = false;
+            this.textEl.innerText   = text;
+            this.#twComplete        = true;
+            this.#setAdvance(false); // en skip no se muestra el ▼
+            this.#twCallback?.();
             return;
         }
 
         // rAF typewriter — velocidad consistente independiente del hardware
-        // y del estado del tab (no se dispara en background como setInterval).
-        // Acumula tiempo real y emite un carácter por cada TW_SPEED ms transcurridos.
-        let i          = 0;
+        let charIndex  = 0;
         let lastTime   = null;
         let accumulated = 0;
 
-        this._twRafId = null;
-        cancelAnimationFrame(this._twRafId);
+        cancelAnimationFrame(this.#twRafId);
 
         const tick = (now) => {
             if (lastTime === null) lastTime = now;
             accumulated += now - lastTime;
             lastTime = now;
 
-            // Emitir todos los caracteres que correspondan al tiempo acumulado
-            while (accumulated >= TW_SPEED && i < text.length) {
-                this.textEl.append(text.charAt(i++));
-                accumulated -= TW_SPEED;
+            while (accumulated >= TYPEWRITER_CHAR_MS && charIndex < text.length) {
+                this.textEl.append(text.charAt(charIndex++));
+                accumulated -= TYPEWRITER_CHAR_MS;
             }
 
-            if (i < text.length) {
-                this._twRafId = requestAnimationFrame(tick);
+            if (charIndex < text.length) {
+                this.#twRafId = requestAnimationFrame(tick);
             } else {
-                this._twRafId = null;
-                this._twDone  = true;
-                this._setAdvance(true);
-                this._twOnDone?.();
+                this.#twRafId    = null;
+                this.#twComplete = true;
+                this.#setAdvance(true);
+                this.#twCallback?.();
             }
         };
 
-        this._twRafId = requestAnimationFrame(tick);
+        this.#twRafId = requestAnimationFrame(tick);
     }
 
+    /**
+     * Completa el texto instantáneamente si el typewriter está en curso.
+     * Aplica skip-lock breve para evitar doble-avance accidental.
+     */
     skipTypewriter() {
-        if (this._twDone) return;
-
-        cancelAnimationFrame(this._twRafId);
-        this._twRafId         = null;
-        this.textEl.innerText = this._twFullText;
-        this._twDone          = true;
-
-        // Lock breve: el usuario necesita ver el texto completo
-        // antes de poder avanzar al siguiente paso
-        this._skipLocked = true;
-        this._setAdvance(true);
-        setTimeout(() => { this._skipLocked = false; }, 180);
-
-        this._twOnDone?.();
+        if (this.#twComplete) return;
+        cancelAnimationFrame(this.#twRafId);
+        this.#twRafId         = null;
+        this.textEl.innerText = this.#twFullText;
+        this.#twComplete      = true;
+        this.#skipLocked      = true;
+        this.#setAdvance(true);
+        setTimeout(() => { this.#skipLocked = false; }, 180);
+        this.#twCallback?.();
     }
 
     /**
-     * Feedback visual al intentar avanzar cuando el texto no terminó.
-     * Pulso sutil en el borde de la caja — indica "espera, estoy escribiendo".
+     * Pulso visual en el textbox al intentar avanzar mientras el texto escribe.
      */
-    /**
-     * Cambia el cursor del click-zone según si se puede avanzar.
-     * 'ready'  → pointer (puede hacer clic)
-     * 'wait'   → default (transición en curso, no hacer clic)
-     * 'typing' → pointer con indicación de skip disponible
-     */
-    /**
-     * Limpia la escena visual completamente.
-     * Llamado por Engine.reset() al iniciar una nueva partida.
-     * No destruye la app PixiJS — solo vacía sprites y fondo.
-     */
-    clearScene() {
-        // Destruir todos los sprites activos
-        for (const sprite of this.activeSprites.values()) {
-            sprite.destroy({ texture: false });
-        }
-        this.activeSprites.clear();
-
-        // Destruir el fondo
-        if (this.bgCurrent) {
-            this.bgCurrent.destroy({ texture: false });
-            this.bgCurrent = null;
-        }
-
-        // Limpiar textbox
-        if (this.nameEl) this.nameEl.innerText = '';
-        if (this.textEl) this.textEl.innerText = '';
-        this._setAdvance(false);
-
-        // Cancelar typewriter en curso
-        cancelAnimationFrame(this._twRafId);
-        this._twRafId    = null;
-        this._twDone     = false;
-        this._twFullText = '';
-        this._twOnDone   = null;
-    }
-
-    setCursorState(state) {
-        const zone = document.getElementById('click-zone');
-        if (!zone) return;
-        if (state === 'wait') {
-            zone.style.cursor = 'default';
-            zone.style.pointerEvents = 'none';
-        } else {
-            zone.style.cursor = 'pointer';
-            zone.style.pointerEvents = '';
-        }
-    }
-
     flashTextBox() {
         if (!this.textBox) return;
         this.textBox.classList.remove('click-flash');
-        // Forzar reflow para reiniciar la animación si se llama repetido
         void this.textBox.offsetWidth;
         this.textBox.classList.add('click-flash');
         setTimeout(() => this.textBox.classList.remove('click-flash'), 150);
     }
 
-    /** Muestra u oculta el indicador de avance (▼) */
-    _setAdvance(visible) {
-        if (!this._advanceEl) return;
-        this._advanceEl.classList.toggle('visible', visible);
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
-    // HELPERS PRIVADOS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    _positionSprite(sprite, slot) {
-        sprite.anchor.set(0.5, 1.0);
-        sprite.x = this.app.screen.width  * (SLOT_X[slot] ?? 0.5);
-        sprite.y = this.app.screen.height;
-
-        const targetH = this.app.screen.height * SPRITE_HEIGHT_RATIO;
-        sprite.scale.set(targetH / sprite.texture.height);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // TRANSICIÓN DE ESCENA
+    // MODOS DE TEXTBOX
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Ejecuta una transición de pantalla completa entre escenas.
-     * Fade to color → callback → fade from color.
+     * Aplica el modo visual narración / diálogo al textbox.
+     * Llamado desde typewriter() y desde Engine.resumeFromState().
      *
-     * @param {'black'|'white'} color - color del fundido
-     * @param {number}          ms    - duración de cada mitad (fade in + fade out)
-     * @returns {Promise<void>}       - resuelve cuando la transición completa
+     * @param {boolean} active — true = narración, false = diálogo
      */
-    async sceneTransition(color = 'black', ms = 500) {
-        const overlay = this.transition;
-        if (!overlay) return;
-
-        overlay.style.background  = color === 'white' ? '#fff' : '#000';
-        overlay.style.transition  = `opacity ${ms}ms ease`;
-        overlay.classList.add('active');
-
-        // Fade IN (oscurece/blanquea la pantalla)
-        await new Promise(resolve => {
-            requestAnimationFrame(() => {
-                overlay.style.opacity = '1';
-                setTimeout(resolve, ms);
-            });
-        });
-
-        // El SceneManager carga la siguiente escena durante la pausa
-        // (el Engine ya llamó sceneLoader antes de llamar sceneTransition)
-        // Pequeña pausa en negro/blanco para que se sienta el corte narrativo
-        await new Promise(r => setTimeout(r, 80));
-
-        // Fade OUT (revela la nueva escena)
-        overlay.style.opacity = '0';
-        await new Promise(r => setTimeout(r, ms));
-
-        overlay.classList.remove('active');
-        overlay.style.transition = '';
-    }
-
-    /**
-     * Cambia entre modo diálogo y modo narración con crossfade suave.
-     * Ahora es async — el typewriter espera a que termine.
-     *
-     * @param {boolean} active   - true = narración, false = diálogo
-     * @param {number}  [ms=220] - duración del crossfade en ms
-     */
-    async _setNarrationMode(active) {
-        // modeTransition ya aplicó la clase y el fade negro antes de llamar
-        // al typewriter — aquí solo corregimos si por algún motivo difieren
-        // (ej: primera línea del script sin transición previa).
+    applyNarrationMode(active) {
         this.textBox.classList.toggle('narration-mode', active);
-        if (active) {
-            this._tweenSpriteAlpha(0.15, 200);
-        } else {
-            this._tweenSpriteAlpha(1, 200);
-        }
+        this.#tweenSpriteAlpha(active ? 0.15 : 1, 200);
     }
 
     /**
-     * Transición de modo narrador ↔ diálogo al estilo Umineko.
+     * Transición con crossfade entre modo narración y diálogo.
+     * Si el modo no cambia, resuelve inmediatamente.
      *
-     * Cuando el modo CAMBIA (narración→diálogo o diálogo→narración):
-     *   1. Bloquea el engine (isTransitioning = true)
-     *   2. Fade a blanco fullscreen en fadeMs
-     *   3. Pausa holdMs para que el jugador perciba el corte
-     *   4. Fade out del blanco
-     *   5. Desbloquea (isTransitioning = false)
-     *
-     * Si el modo NO cambia, resuelve inmediatamente sin efectos.
-     *
-     * @param {boolean} toNarration - true = vamos a narración, false = vamos a diálogo
-     * @param {number}  fadeMs      - duración del fade in/out (ms)
-     * @param {number}  holdMs      - tiempo en blanco antes del fade out (ms)
-     * @returns {Promise<void>}
+     * @param {boolean} toNarration
+     * @param {number}  [fadeMs]
      */
     async modeTransition(toNarration, fadeMs = 140) {
-        const alreadyNarration = this.textBox.classList.contains('narration-mode');
-
-        // Sin cambio de modo — nada que hacer
-        if (alreadyNarration === toNarration) return;
+        const already = this.textBox.classList.contains('narration-mode');
+        if (already === toNarration) return;
 
         const overlay = this.transition;
         if (!overlay) return;
 
         this.isTransitioning = true;
 
-        // ── Fase 1: Fade a negro (rápido) ────────────────────────────────
         overlay.style.background = '#000000';
         overlay.style.transition = `opacity ${fadeMs}ms ease-in`;
         overlay.classList.add('active');
@@ -504,131 +433,103 @@ export class Renderer {
             });
         });
 
-        // ── Pantalla en negro: preparar todo de golpe ─────────────────────
-        // Cancelar typewriter en curso si lo hay
-        cancelAnimationFrame(this._twRafId);
-        this._twRafId = null;
-        if (this.textEl)  this.textEl.innerText = '';
-        if (this.nameEl)  this.nameEl.innerText = '';
-        this._setAdvance(false);
-
-        // Cambiar modo de textbox mientras nadie puede verlo
+        cancelAnimationFrame(this.#twRafId);
+        this.#twRafId = null;
+        if (this.textEl) this.textEl.innerText = '';
+        if (this.nameEl) this.nameEl.innerText = '';
+        this.#setAdvance(false);
         this.textBox.classList.toggle('narration-mode', toNarration);
+        this.#tweenSpriteAlpha(toNarration ? 0.15 : 1, fadeMs * 2);
 
-        // Ajustar alpha de sprites para el modo destino
-        const targetAlpha = toNarration ? 0.15 : 1;
-        this._tweenSpriteAlpha(targetAlpha, fadeMs * 2);
-
-        // ── Fase 2: Fade-out del negro EN BACKGROUND ──────────────────────
-        // Arrancamos el reveal pero NO esperamos — el typewriter empieza
-        // mientras el negro se levanta, dando la sensación de una sola acción.
         overlay.style.transition = `opacity ${fadeMs * 1.8}ms ease-out`;
         requestAnimationFrame(() => { overlay.style.opacity = '0'; });
-
-        // Limpiar el overlay cuando termine (sin bloquear)
         setTimeout(() => {
             overlay.classList.remove('active');
             overlay.style.transition = '';
             overlay.style.background = '';
         }, fadeMs * 1.8 + 20);
 
-        // Desbloquear el engine: el typewriter arranca solapado con el fade-out
         this.isTransitioning = false;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // LIMPIEZA DE ESCENA
+    // ─────────────────────────────────────────────────────────────────────────
+
     /**
-     * Anima el alpha del spriteLayer suavemente.
-     * @param {number} target  - alpha destino (0.0–1.0)
-     * @param {number} ms      - duración en ms
+     * Vacía sprites, fondo y textbox sin destruir la app PixiJS.
+     * Llamar desde Engine.reset().
      */
-    _tweenSpriteAlpha(target, ms) {
-        const start     = this.spriteLayer.alpha;
-        const delta     = target - start;
-        const startTime = performance.now();
-
-        const tick = (now) => {
-            const t = Math.min((now - startTime) / ms, 1);
-            // Ease in-out cuadrático
-            const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-            this.spriteLayer.alpha = start + delta * ease;
-            if (t < 1) requestAnimationFrame(tick);
-        };
-
-        requestAnimationFrame(tick);
-    }
-
-    _destroySprite(actor) {
-        const existing = this.activeSprites.get(actor);
-        if (existing) {
-            existing.destroy({ texture: false });
-            this.activeSprites.delete(actor);
+    clearScene() {
+        for (const sprite of this.activeSprites.values()) {
+            sprite.destroy({ texture: false });
         }
-    }
+        this.activeSprites.clear();
 
-    _onResize() {
-        const w = this.app.screen.width;
-        const h = this.app.screen.height;
-
-        // Reescalar fondo
         if (this.bgCurrent) {
-            this.bgCurrent.width  = w;
-            this.bgCurrent.height = h;
+            this.bgCurrent.destroy({ texture: false });
+            this.bgCurrent = null;
         }
 
-        // Reposicionar todos los sprites activos
-        for (const [, sprite] of this.activeSprites) {
-            const slot = sprite._dramSlot;
-            if (slot) this._positionSprite(sprite, slot);
+        if (this.nameEl) this.nameEl.innerText = '';
+        if (this.textEl) this.textEl.innerText = '';
+        this.#setAdvance(false);
+
+        cancelAnimationFrame(this.#twRafId);
+        this.#twRafId    = null;
+        this.#twComplete = false;
+        this.#twFullText = '';
+        this.#twCallback = null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRANSICIÓN DE ESCENA
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fade fullscreen entre escenas (goto fade:black / fade:white).
+     * @param {'black'|'white'} color
+     * @param {number}          ms
+     */
+    async sceneTransition(color = 'black', ms = 500) {
+        const overlay = this.transition;
+        if (!overlay) return;
+
+        overlay.style.background = color === 'white' ? '#fff' : '#000';
+        overlay.style.transition = `opacity ${ms}ms ease`;
+        overlay.classList.add('active');
+
+        await new Promise(resolve => {
+            requestAnimationFrame(() => {
+                overlay.style.opacity = '1';
+                setTimeout(resolve, ms);
+            });
+        });
+
+        await new Promise(r => setTimeout(r, 80));
+
+        overlay.style.opacity = '0';
+        await new Promise(r => setTimeout(r, ms));
+
+        overlay.classList.remove('active');
+        overlay.style.transition = '';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CURSOR
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** @param {'ready' | 'wait' | 'typing'} state */
+    setCursorState(state) {
+        const zone = document.getElementById('click-zone');
+        if (!zone) return;
+        if (state === 'wait') {
+            zone.style.cursor        = 'default';
+            zone.style.pointerEvents = 'none';
+        } else {
+            zone.style.cursor        = 'pointer';
+            zone.style.pointerEvents = '';
         }
-    }
-
-    _parseTime(str = '1s') {
-        if (typeof str === 'number') return str;
-        if (str.endsWith('ms')) return parseInt(str);
-        return parseFloat(str) * 1000;
-    }
-
-    _fadeIn(obj, durationMs = FADE_MS) {
-        return new Promise(resolve => {
-            obj.alpha   = 0;
-            const start = performance.now();
-            const tick  = () => {
-                const t   = Math.min((performance.now() - start) / durationMs, 1);
-                obj.alpha = t;
-                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
-            };
-            this.app.ticker.add(tick);
-        });
-    }
-
-    _fadeOut(obj, durationMs = FADE_MS) {
-        return new Promise(resolve => {
-            const startAlpha = obj.alpha;
-            const start      = performance.now();
-            const tick       = () => {
-                const t   = Math.min((performance.now() - start) / durationMs, 1);
-                obj.alpha = startAlpha * (1 - t);
-                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
-            };
-            this.app.ticker.add(tick);
-        });
-    }
-
-    /** Ease-out cúbico — movimientos naturales, no mecánicos. */
-    _moveTo(obj, targetX, targetY, durationMs = FADE_MS) {
-        return new Promise(resolve => {
-            const startX = obj.x;
-            const startY = obj.y;
-            const start  = performance.now();
-            const tick   = () => {
-                const t    = Math.min((performance.now() - start) / durationMs, 1);
-                const ease = 1 - Math.pow(1 - t, 3);
-                obj.x      = startX + (targetX - startX) * ease;
-                obj.y      = startY + (targetY - startY) * ease;
-                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
-            };
-            this.app.ticker.add(tick);
-        });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -636,120 +537,206 @@ export class Renderer {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Sacude el stage de PixiJS lateralmente durante la duración indicada.
-     * Usa el PixiJS Ticker para sincronizar con el loop de render.
-     * Bloquea hasta que termina — el Engine hace await antes de _nextInternal().
-     *
-     * @param {number} durationMs - Duración total del shake en milisegundos
-     * @returns {Promise<void>}
+     * Sacude el stage lateralmente. Bloquea hasta que termina.
+     * @param {number} durationMs
      */
     fxShake(durationMs) {
         return new Promise(resolve => {
-            const stage      = this.app.stage;
-            const originX    = stage.x;
-            const originY    = stage.y;
-            const intensity  = 8;  // píxeles máximos de desplazamiento
-            const start      = performance.now();
+            const stage     = this.app.stage;
+            const originX   = stage.x;
+            const originY   = stage.y;
+            const intensity = 8;
+            const start     = performance.now();
 
             const tick = () => {
-                const elapsed = performance.now() - start;
-                const t       = Math.min(elapsed / durationMs, 1);
-
-                // La intensidad decae conforme se acerca al final (ease-out)
-                const decay     = 1 - t;
-                const amplitude = intensity * decay;
-
-                stage.x = originX + (Math.random() * 2 - 1) * amplitude;
-                stage.y = originY + (Math.random() * 2 - 1) * amplitude * 0.5;
+                const t       = Math.min((performance.now() - start) / durationMs, 1);
+                const amp     = intensity * (1 - t);
+                stage.x       = originX + (Math.random() * 2 - 1) * amp;
+                stage.y       = originY + (Math.random() * 2 - 1) * amp * 0.5;
 
                 if (t >= 1) {
-                    // Restaurar posición exacta al terminar
                     stage.x = originX;
                     stage.y = originY;
                     this.app.ticker.remove(tick);
                     resolve();
                 }
             };
-
             this.app.ticker.add(tick);
         });
     }
 
     /**
-     * Flash de color sobre toda la pantalla.
-     * Usa un overlay DOM encima del canvas — más simple que un sprite PixiJS
-     * y garantiza que tape absolutamente todo (HUD incluido si se desea).
-     * Bloquea hasta que el overlay desaparece completamente.
-     *
+     * Flash de color (fade in + fade out). Bloquea hasta que desaparece.
      * @param {'white'|'black'} color
-     * @param {number}          durationMs - Duración del ciclo completo (flash in + out)
-     * @returns {Promise<void>}
+     * @param {number}          durationMs — ciclo completo
      */
     fxFlash(color, durationMs) {
         return new Promise(resolve => {
-            // Reutilizar #scene-transition si existe, o crear un overlay temporal
             let overlay = document.getElementById('fx-flash-overlay');
             if (!overlay) {
                 overlay = document.createElement('div');
                 overlay.id = 'fx-flash-overlay';
                 Object.assign(overlay.style, {
-                    position:      'absolute',
-                    inset:         '0',
-                    zIndex:        '20',
-                    pointerEvents: 'none',
-                    opacity:       '0',
+                    position: 'absolute', inset: '0', zIndex: '20',
+                    pointerEvents: 'none', opacity: '0',
                 });
                 document.getElementById('viewport')?.appendChild(overlay);
             }
 
-            const halfMs = durationMs / 2;
-
-            overlay.style.background  = color === 'white' ? '#ffffff' : '#000000';
-            overlay.style.transition  = `opacity ${halfMs}ms ease`;
-            overlay.style.opacity     = '0';
-
-            // Forzar reflow
+            const half = durationMs / 2;
+            overlay.style.background = color === 'white' ? '#ffffff' : '#000000';
+            overlay.style.transition = `opacity ${half}ms ease`;
+            overlay.style.opacity    = '0';
             void overlay.offsetHeight;
-
-            // Flash IN
             overlay.style.opacity = '1';
 
             setTimeout(() => {
-                // Flash OUT
                 overlay.style.opacity = '0';
-                setTimeout(() => resolve(), halfMs);
-            }, halfMs);
+                setTimeout(resolve, half);
+            }, half);
         });
     }
 
     /**
-     * Activa o desactiva una viñeta (oscurecimiento de bordes) sobre el canvas.
-     * Instantáneo — no bloquea el engine.
-     * Usa un elemento DOM con gradiente radial para evitar afectar el render PixiJS.
-     *
-     * @param {boolean} active - true = encender, false = apagar
+     * Activa o desactiva viñeta sobre el canvas. No bloquea.
+     * @param {boolean} active
      */
     fxVignette(active) {
-        let vignette = document.getElementById('fx-vignette-overlay');
-
-        if (!vignette) {
-            vignette = document.createElement('div');
-            vignette.id = 'fx-vignette-overlay';
-            Object.assign(vignette.style, {
-                position:      'absolute',
-                inset:         '0',
-                zIndex:        '15',
-                pointerEvents: 'none',
-                background:    'radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.72) 100%)',
-                opacity:       '0',
-                transition:    'opacity 0.5s ease',
+        let el = document.getElementById('fx-vignette-overlay');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'fx-vignette-overlay';
+            Object.assign(el.style, {
+                position: 'absolute', inset: '0', zIndex: '15',
+                pointerEvents: 'none', opacity: '0', transition: 'opacity 0.5s ease',
+                background: 'radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.72) 100%)',
             });
-            document.getElementById('viewport')?.appendChild(vignette);
+            document.getElementById('viewport')?.appendChild(el);
         }
+        el.style.opacity = active ? '1' : '0';
+    }
 
-        vignette.style.opacity = active ? '1' : '0';
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRIVADO
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @param {import('pixi.js').Sprite} sprite
+     * @param {string} slot
+     */
+    #positionSprite(sprite, slot) {
+        sprite.anchor.set(0.5, 1.0);
+        sprite.x = this.app.screen.width  * (SLOT_X[slot] ?? 0.5);
+        sprite.y = this.app.screen.height;
+        const targetH = this.app.screen.height * SPRITE_HEIGHT_RATIO;
+        sprite.scale.set(targetH / sprite.texture.height);
+    }
+
+    /** @param {string} actor */
+    #destroySprite(actor) {
+        const sprite = this.activeSprites.get(actor);
+        if (sprite) {
+            sprite.destroy({ texture: false });
+            this.activeSprites.delete(actor);
+        }
+    }
+
+    #onResize() {
+        const { width, height } = this.app.screen;
+        if (this.bgCurrent) {
+            this.bgCurrent.width  = width;
+            this.bgCurrent.height = height;
+        }
+        for (const [, sprite] of this.activeSprites) {
+            if (sprite._dramSlot) this.#positionSprite(sprite, sprite._dramSlot);
+        }
+    }
+
+    /** @param {string|number} value — '2s' | '500ms' | número en ms */
+    #parseTime(value) {
+        if (typeof value === 'number') return value;
+        if (value.endsWith('ms')) return parseInt(value);
+        return parseFloat(value) * 1000;
+    }
+
+    /** @param {boolean} visible */
+    #setAdvance(visible) {
+        this.#advanceIndicator?.classList.toggle('visible', visible);
+    }
+
+    /**
+     * Anima el alpha del spriteLayer con ease in-out cuadrático.
+     * @param {number} target — 0.0–1.0
+     * @param {number} ms
+     */
+    #tweenSpriteAlpha(target, ms) {
+        const start     = this.spriteLayer.alpha;
+        const delta     = target - start;
+        const startTime = performance.now();
+
+        const tick = (now) => {
+            const t    = Math.min((now - startTime) / ms, 1);
+            const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+            this.spriteLayer.alpha = start + delta * ease;
+            if (t < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+    }
+
+    /**
+     * @param {object} obj — Sprite u objeto PixiJS con alpha
+     * @param {number} [ms]
+     */
+    #fadeIn(obj, ms = FADE_MS) {
+        return new Promise(resolve => {
+            obj.alpha   = 0;
+            const start = performance.now();
+            const tick  = () => {
+                const t   = Math.min((performance.now() - start) / ms, 1);
+                obj.alpha = t;
+                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
+            };
+            this.app.ticker.add(tick);
+        });
+    }
+
+    /**
+     * @param {object} obj
+     * @param {number} [ms]
+     */
+    #fadeOut(obj, ms = FADE_MS) {
+        return new Promise(resolve => {
+            const startAlpha = obj.alpha;
+            const start      = performance.now();
+            const tick       = () => {
+                const t   = Math.min((performance.now() - start) / ms, 1);
+                obj.alpha = startAlpha * (1 - t);
+                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
+            };
+            this.app.ticker.add(tick);
+        });
+    }
+
+    /**
+     * Ease-out cúbico — movimientos naturales.
+     * @param {object} obj
+     * @param {number} targetX
+     * @param {number} targetY
+     * @param {number} [ms]
+     */
+    #moveTo(obj, targetX, targetY, ms = FADE_MS) {
+        return new Promise(resolve => {
+            const sx = obj.x;
+            const sy = obj.y;
+            const start = performance.now();
+            const tick  = () => {
+                const t    = Math.min((performance.now() - start) / ms, 1);
+                const ease = 1 - Math.pow(1 - t, 3);
+                obj.x      = sx + (targetX - sx) * ease;
+                obj.y      = sy + (targetY - sy) * ease;
+                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
+            };
+            this.app.ticker.add(tick);
+        });
     }
 }
-
-/** Pequeña utilidad async para esperar ms — usada en animaciones DOM */
-function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

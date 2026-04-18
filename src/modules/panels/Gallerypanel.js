@@ -1,11 +1,17 @@
 // src/modules/panels/GalleryPanel.js
+//
+// RESPONSABILIDAD:
+//   Renderizar el grid de CGs desbloqueados y gestionar el lightbox integrado.
+//   No accede a la DB — recibe las entradas ya resueltas desde MenuSystem.
+
+// ─── Typedefs ─────────────────────────────────────────────────────────────────
 
 /**
  * @typedef {Object} GalleryEntry
- * @property {string} id         - Identificador del CG
- * @property {string} title      - Título visible en la galería
- * @property {string} path       - Ruta base sin extensión
- * @property {number} unlockedAt - Timestamp de desbloqueo
+ * @property {string} id
+ * @property {string} title
+ * @property {string} path        — ruta base sin extensión
+ * @property {number} unlockedAt
  */
 
 /**
@@ -13,17 +19,11 @@
  * @property {() => void} onClose
  */
 
+// ─── GalleryPanel ─────────────────────────────────────────────────────────────
+
 /**
- * Panel de galería de CGs desbloqueados con lightbox integrado.
- *
- * Responsabilidad única: renderizar el grid de CGs disponibles,
- * gestionar la navegación del lightbox y notificar el cierre.
- * No accede a la DB directamente — recibe las entradas ya resueltas.
- *
  * @example
- * const galleryPanel = new GalleryPanel({
- *     onClose: () => galleryPanel.hide(),
- * });
+ * const galleryPanel = new GalleryPanel({ onClose: () => galleryPanel.hide() });
  * galleryPanel.mount(document.body);
  * galleryPanel.open(unlockedEntries);
  */
@@ -42,16 +42,16 @@ export class GalleryPanel {
     #lightboxElement;
 
     /** @type {HTMLImageElement} */
-    #lightboxImageElement;
+    #lightboxImage;
 
     /** @type {HTMLElement} */
-    #lightboxCaptionElement;
+    #lightboxCaption;
 
     /** @type {GalleryEntry[]} */
-    #currentEntries = [];
+    #entries = [];
 
     /** @type {number} */
-    #activeLightboxIndex = 0;
+    #lightboxIndex = 0;
 
     /** @param {GalleryPanelEvents} events */
     constructor(events) {
@@ -61,20 +61,17 @@ export class GalleryPanel {
 
     // ── API pública ────────────────────────────────────────────────────────
 
-    /**
-     * Inserta el panel en el DOM. Llamar una sola vez.
-     * @param {HTMLElement} parentElement
-     */
+    /** Inserta el panel en el DOM. Llamar una sola vez. */
     mount(parentElement) {
         parentElement.appendChild(this.#rootElement);
     }
 
     /**
-     * Muestra el panel con las entradas de galería proporcionadas.
+     * Muestra el panel con las entradas proporcionadas.
      * @param {GalleryEntry[]} entries
      */
     open(entries) {
-        this.#currentEntries = entries;
+        this.#entries = entries;
         this.#renderGrid();
         this.#rootElement.classList.remove('dm-hidden');
     }
@@ -85,15 +82,21 @@ export class GalleryPanel {
         this.#rootElement.classList.add('dm-hidden');
     }
 
+    /** @returns {boolean} */
+    get isOpen() {
+        return !this.#rootElement.classList.contains('dm-hidden');
+    }
+
     /**
      * Navega el lightbox en la dirección indicada.
-     * Llamable desde el teclado en el orquestador.
+     * Llamable desde el teclado en MenuSystem.
      * @param {-1 | 1} direction
      */
     navigateLightbox(direction) {
-        if (this.#currentEntries.length === 0) return;
-        const lastIndex = this.#currentEntries.length - 1;
-        this.#activeLightboxIndex = (this.#activeLightboxIndex + direction + this.#currentEntries.length) % this.#currentEntries.length;
+        if (this.#entries.length === 0) return;
+        this.#lightboxIndex =
+            (this.#lightboxIndex + direction + this.#entries.length)
+            % this.#entries.length;
         this.#updateLightboxContent();
     }
 
@@ -107,21 +110,15 @@ export class GalleryPanel {
         const inner = document.createElement('div');
         inner.className = 'dm-gallery__inner';
 
-        const header = this.#buildPanelHeader();
-
         this.#gridElement = document.createElement('div');
         this.#gridElement.className = 'dm-gallery__grid';
 
-        inner.append(header, this.#gridElement);
-        panel.appendChild(inner);
-
-        const lightbox = this.#buildLightbox();
-        panel.appendChild(lightbox);
-
+        inner.append(this.#buildHeader(), this.#gridElement);
+        panel.append(inner, this.#buildLightbox());
         return panel;
     }
 
-    #buildPanelHeader() {
+    #buildHeader() {
         const header = document.createElement('div');
         header.className = 'dm-gallery__header';
 
@@ -129,12 +126,12 @@ export class GalleryPanel {
         title.className   = 'dm-gallery__title';
         title.textContent = 'Galería';
 
-        const closeButton = document.createElement('button');
-        closeButton.className   = 'dm-gallery__close';
-        closeButton.textContent = '✕';
-        closeButton.addEventListener('click', () => this.#events.onClose());
+        const close = document.createElement('button');
+        close.className   = 'dm-gallery__close';
+        close.textContent = '✕';
+        close.addEventListener('click', () => this.#events.onClose());
 
-        header.append(title, closeButton);
+        header.append(title, close);
         return header;
     }
 
@@ -142,33 +139,25 @@ export class GalleryPanel {
         this.#lightboxElement = document.createElement('div');
         this.#lightboxElement.className = 'dm-gallery__lightbox dm-hidden';
 
-        const closeButton = this.#buildLightboxButton('dm-gallery__lb-close', '✕',
-            () => this.#closeLightbox());
+        this.#lightboxImage = document.createElement('img');
+        this.#lightboxImage.className = 'dm-gallery__lb-img';
+        this.#lightboxImage.alt       = '';
 
-        const prevButton = this.#buildLightboxButton('dm-gallery__lb-prev', '‹',
-            () => this.navigateLightbox(-1));
-
-        const nextButton = this.#buildLightboxButton('dm-gallery__lb-next', '›',
-            () => this.navigateLightbox(1));
-
-        this.#lightboxImageElement = document.createElement('img');
-        this.#lightboxImageElement.className = 'dm-gallery__lb-img';
-        this.#lightboxImageElement.alt       = '';
-
-        this.#lightboxCaptionElement = document.createElement('div');
-        this.#lightboxCaptionElement.className = 'dm-gallery__lb-caption';
-
-        this.#lightboxElement.addEventListener('click', (clickEvent) => {
-            if (clickEvent.target === this.#lightboxElement) this.#closeLightbox();
-        });
+        this.#lightboxCaption = document.createElement('div');
+        this.#lightboxCaption.className = 'dm-gallery__lb-caption';
 
         this.#lightboxElement.append(
-            closeButton,
-            prevButton,
-            this.#lightboxImageElement,
-            this.#lightboxCaptionElement,
-            nextButton,
+            this.#buildLightboxBtn('dm-gallery__lb-close', '✕', () => this.#closeLightbox()),
+            this.#buildLightboxBtn('dm-gallery__lb-prev',  '‹', () => this.navigateLightbox(-1)),
+            this.#lightboxImage,
+            this.#lightboxCaption,
+            this.#buildLightboxBtn('dm-gallery__lb-next',  '›', () => this.navigateLightbox(1)),
         );
+
+        // Clic en el fondo del lightbox lo cierra
+        this.#lightboxElement.addEventListener('click', (e) => {
+            if (e.target === this.#lightboxElement) this.#closeLightbox();
+        });
 
         return this.#lightboxElement;
     }
@@ -178,72 +167,61 @@ export class GalleryPanel {
      * @param {string}   label
      * @param {Function} onClick
      */
-    #buildLightboxButton(className, label, onClick) {
-        const button = document.createElement('button');
-        button.className   = className;
-        button.textContent = label;
-        button.addEventListener('click', onClick);
-        return button;
+    #buildLightboxBtn(className, label, onClick) {
+        const btn = document.createElement('button');
+        btn.className   = className;
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        return btn;
     }
 
-    // ── Renderizado del grid ───────────────────────────────────────────────
+    // ── Grid ───────────────────────────────────────────────────────────────
 
     #renderGrid() {
         this.#gridElement.innerHTML = '';
 
-        if (this.#currentEntries.length === 0) {
-            this.#gridElement.appendChild(this.#buildEmptyStateElement());
+        if (this.#entries.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'dm-gallery__empty';
+            empty.innerHTML = `Todavía no hay imágenes desbloqueadas.<br>
+                <span>Continúa jugando para descubrirlas.</span>`;
+            this.#gridElement.appendChild(empty);
             return;
         }
 
-        const thumbnails = this.#currentEntries.map((entry, entryIndex) =>
-            this.#buildThumbnailElement(entry, entryIndex));
-
+        const thumbnails = this.#entries.map((entry, index) =>
+            this.#buildThumbnail(entry, index));
         this.#gridElement.append(...thumbnails);
-    }
-
-    #buildEmptyStateElement() {
-        const emptyState = document.createElement('div');
-        emptyState.className = 'dm-gallery__empty';
-        emptyState.innerHTML = `
-            Todavía no hay imágenes desbloqueadas.<br>
-            <span>Continúa jugando para descubrirlas.</span>
-        `;
-        return emptyState;
     }
 
     /**
      * @param {GalleryEntry} entry
-     * @param {number}       entryIndex
+     * @param {number}       index
      */
-    #buildThumbnailElement(entry, entryIndex) {
-        const thumbnailButton = document.createElement('button');
-        thumbnailButton.className = 'dm-gallery__thumb';
-        thumbnailButton.title     = entry.title;
-        thumbnailButton.dataset.index = String(entryIndex);
+    #buildThumbnail(entry, index) {
+        const btn = document.createElement('button');
+        btn.className = 'dm-gallery__thumb';
+        btn.title     = entry.title;
 
-        const thumbnailImage = document.createElement('img');
-        thumbnailImage.src = `${entry.path}.webp`;
-        thumbnailImage.alt = entry.title;
-        thumbnailImage.addEventListener('error', () => {
-            thumbnailImage.src = `${entry.path}.png`;
-        }, { once: true });
+        const img = document.createElement('img');
+        img.src = `${entry.path}.webp`;
+        img.alt = entry.title;
+        img.addEventListener('error', () => { img.src = `${entry.path}.png`; }, { once: true });
 
-        const captionLabel = document.createElement('span');
-        captionLabel.className   = 'dm-gallery__thumb-label';
-        captionLabel.textContent = entry.title;
+        const caption = document.createElement('span');
+        caption.className   = 'dm-gallery__thumb-label';
+        caption.textContent = entry.title;
 
-        thumbnailButton.append(thumbnailImage, captionLabel);
-        thumbnailButton.addEventListener('click', () => this.#openLightbox(entryIndex));
-
-        return thumbnailButton;
+        btn.append(img, caption);
+        btn.addEventListener('click', () => this.#openLightbox(index));
+        return btn;
     }
 
     // ── Lightbox ───────────────────────────────────────────────────────────
 
-    /** @param {number} entryIndex */
-    #openLightbox(entryIndex) {
-        this.#activeLightboxIndex = entryIndex;
+    /** @param {number} index */
+    #openLightbox(index) {
+        this.#lightboxIndex = index;
         this.#updateLightboxContent();
         this.#lightboxElement.classList.remove('dm-hidden');
     }
@@ -253,15 +231,14 @@ export class GalleryPanel {
     }
 
     #updateLightboxContent() {
-        const activeEntry = this.#currentEntries[this.#activeLightboxIndex];
-        if (!activeEntry) return;
+        const entry = this.#entries[this.#lightboxIndex];
+        if (!entry) return;
 
-        this.#lightboxImageElement.src = `${activeEntry.path}.webp`;
-        this.#lightboxImageElement.alt = activeEntry.title;
-        this.#lightboxImageElement.addEventListener('error', () => {
-            this.#lightboxImageElement.src = `${activeEntry.path}.png`;
-        }, { once: true });
+        this.#lightboxImage.src = `${entry.path}.webp`;
+        this.#lightboxImage.alt = entry.title;
+        this.#lightboxImage.addEventListener(
+            'error', () => { this.#lightboxImage.src = `${entry.path}.png`; }, { once: true });
 
-        this.#lightboxCaptionElement.textContent = activeEntry.title;
+        this.#lightboxCaption.textContent = entry.title;
     }
 }
