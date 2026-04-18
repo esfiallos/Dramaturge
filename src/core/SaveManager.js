@@ -1,4 +1,12 @@
 // src/core/SaveManager.js
+//
+// RESPONSABILIDAD:
+//   Toda la persistencia de partidas. Nada fuera de este módulo
+//   sabe que existe Dexie ni qué tablas hay en la DB.
+//
+// PARA AÑADIR UN NUEVO TIPO DE DATO PERSISTENTE:
+//   Añadir un método aquí. Los módulos externos solo ven métodos
+//   con nombres de dominio (listUnlockedCGs, deleteSlot…), nunca tablas.
 
 import { GameState } from './State.js';
 
@@ -6,14 +14,6 @@ import { GameState } from './State.js';
 
 /**
  * @typedef {'autosave' | 'slot_1' | 'slot_2' | 'slot_3'} SaveSlotId
- */
-
-/**
- * @typedef {Object} SlotSummary
- * @property {SaveSlotId} slotId
- * @property {number}     savedAt
- * @property {string}     currentFile
- * @property {number}     currentIndex
  */
 
 /**
@@ -26,27 +26,6 @@ import { GameState } from './State.js';
 
 // ─── SaveManager ──────────────────────────────────────────────────────────────
 
-/**
- * Gestiona la persistencia de partidas en Dexie (IndexedDB).
- *
- * Responsabilidades:
- * - Guardar y cargar `GameState` en slots predefinidos
- * - Exportar e importar partidas como archivos `.json`
- * - Eliminar slots individuales
- * - Consultar la galería de CGs desbloqueados
- *
- * No conoce al Engine ni al Renderer — opera exclusivamente con
- * objetos planos (`GameState.toJSON()` / `GameState.fromJSON()`).
- *
- * Slots disponibles:
- * - `autosave`                      — guardado automático tras cada diálogo
- * - `slot_1`, `slot_2`, `slot_3`   — slots manuales del jugador
- *
- * @example
- * const saveManager = new SaveManager(db);
- * await saveManager.save(engine.state, 'slot_1');
- * const restoredState = await saveManager.load('slot_1');
- */
 export class SaveManager {
 
     /** @type {import('dexie').Dexie} */
@@ -57,56 +36,34 @@ export class SaveManager {
         this.#db = db;
     }
 
-    // ── Persistencia en Dexie ──────────────────────────────────────────────
+    // ── Partidas ───────────────────────────────────────────────────────────
 
     /**
-     * Guarda el estado actual en el slot indicado.
-     * Sobrescribe si el slot ya tenía datos.
-     *
-     * @param {GameState}   state
-     * @param {SaveSlotId}  slotId
+     * Guarda el estado en el slot indicado. Sobrescribe si ya existía.
+     * @param {GameState}  state
+     * @param {SaveSlotId} slotId
      * @returns {Promise<object>} — el snapshot guardado
      */
     async save(state, slotId = 'autosave') {
-        const snapshot = {
-            slotId,
-            ...state.toJSON(),
-            savedAt: Date.now(),
-        };
-
+        const snapshot = { slotId, ...state.toJSON(), savedAt: Date.now() };
         await this.#db.saves.put(snapshot);
         console.log(`[SaveManager] Guardado en "${slotId}".`);
         return snapshot;
     }
 
     /**
-     * Carga un slot y devuelve una instancia de `GameState`.
-     * Devuelve `null` si el slot está vacío.
-     *
-     * @param   {SaveSlotId}      slotId
+     * Carga un slot y devuelve un GameState, o null si está vacío.
+     * @param   {SaveSlotId} slotId
      * @returns {Promise<GameState|null>}
      */
     async load(slotId = 'autosave') {
         const snapshot = await this.#db.saves.get(slotId);
-
         if (!snapshot) {
             console.warn(`[SaveManager] Slot "${slotId}" vacío.`);
             return null;
         }
-
         console.log(`[SaveManager] Cargado desde "${slotId}".`);
         return GameState.fromJSON(snapshot);
-    }
-
-    /**
-     * Devuelve un resumen de todos los slots guardados, ordenados por fecha desc.
-     * @returns {Promise<SlotSummary[]>}
-     */
-    async listSlots() {
-        return this.#db.saves
-            .orderBy('savedAt')
-            .reverse()
-            .toArray();
     }
 
     /**
@@ -123,8 +80,8 @@ export class SaveManager {
     /**
      * Devuelve todos los CGs desbloqueados, ordenados por fecha de desbloqueo.
      *
-     * Encapsula el acceso a la tabla `gallery` de IndexedDB. Los módulos
-     * externos no necesitan saber que existe Dexie ni la estructura de la tabla.
+     * Encapsula el acceso a la tabla `gallery` de IndexedDB.
+     * MenuSystem nunca necesita saber que esa tabla existe.
      *
      * @returns {Promise<CgEntry[]>}
      */
@@ -133,61 +90,48 @@ export class SaveManager {
         return this.#db.gallery.orderBy('unlockedAt').toArray();
     }
 
-    // ── Export / Import JSON ───────────────────────────────────────────────
+    // ── Export / Import ────────────────────────────────────────────────────
 
     /**
-     * Descarga el estado actual como archivo `.json`.
-     * El nombre incluye la fecha para identificación fácil.
+     * Descarga el estado actual como archivo .json.
      * @param {GameState} state
      */
     exportToFile(state) {
-        const snapshot      = state.toJSON();
-        const jsonContent   = JSON.stringify(snapshot, null, 2);
-        const exportDate    = new Date().toISOString().slice(0, 10);
-        const downloadName  = `dramaturge_save_${exportDate}.json`;
-
-        const blob          = new Blob([jsonContent], { type: 'application/json' });
-        const downloadUrl   = URL.createObjectURL(blob);
-        const anchorElement = document.createElement('a');
-
-        anchorElement.href     = downloadUrl;
-        anchorElement.download = downloadName;
-        anchorElement.click();
-
-        URL.revokeObjectURL(downloadUrl);
-        console.log(`[SaveManager] Exportado como "${downloadName}".`);
+        const json       = JSON.stringify(state.toJSON(), null, 2);
+        const date       = new Date().toISOString().slice(0, 10);
+        const filename   = `dramaturge_save_${date}.json`;
+        const url        = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+        const anchor     = document.createElement('a');
+        anchor.href      = url;
+        anchor.download  = filename;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        console.log(`[SaveManager] Exportado como "${filename}".`);
     }
 
     /**
-     * Abre un selector de archivo y devuelve el `GameState` importado.
-     * Devuelve `null` si el jugador cancela o el archivo es inválido.
+     * Abre un selector de archivo y devuelve el GameState importado.
+     * Devuelve null si el jugador cancela o el archivo es inválido.
      * @returns {Promise<GameState|null>}
      */
     importFromFile() {
         return new Promise((resolve) => {
-            const fileInput  = document.createElement('input');
-            fileInput.type   = 'file';
-            fileInput.accept = '.json';
-
-            fileInput.onchange = async (changeEvent) => {
-                const selectedFile = changeEvent.target.files[0];
-                if (!selectedFile) { resolve(null); return; }
-
+            const input    = document.createElement('input');
+            input.type     = 'file';
+            input.accept   = '.json';
+            input.onchange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) { resolve(null); return; }
                 try {
-                    const fileContent    = await selectedFile.text();
-                    const parsedSnapshot = JSON.parse(fileContent);
-                    const restoredState  = GameState.fromJSON(parsedSnapshot);
-
+                    const text = await file.text();
+                    resolve(GameState.fromJSON(JSON.parse(text)));
                     console.log('[SaveManager] Partida importada correctamente.');
-                    resolve(restoredState);
-
-                } catch (parseError) {
-                    console.error('[SaveManager] Archivo inválido:', parseError.message);
+                } catch (err) {
+                    console.error('[SaveManager] Archivo inválido:', err.message);
                     resolve(null);
                 }
             };
-
-            fileInput.click();
+            input.click();
         });
     }
 }
