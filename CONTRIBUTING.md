@@ -1,16 +1,19 @@
 # Contribuir a Dramaturge
 
-Gracias por el interés. Antes de empezar, lee esto — es corto y evita trabajo innecesario para los dos.
+Antes de empezar, lee esto — es corto y evita trabajo innecesario.
 
 ---
 
 ## Lo primero: abre un Issue
 
-**Antes de escribir una sola línea de código**, abre un Issue describiendo lo que propones. Para bugs incluye pasos de reproducción. Para features, explica el caso de uso concreto.
+**Antes de escribir una línea de código**, abre un Issue describiendo lo que propones.
+Para bugs incluye pasos de reproducción. Para features, explica el caso de uso concreto.
 
-Espera confirmación antes de implementar. El proyecto tiene una dirección técnica y narrativa definida — algunos cambios no encajan aunque sean correctos técnicamente. Es mejor saberlo antes de invertir tiempo.
+Espera confirmación antes de implementar. El proyecto tiene una dirección técnica
+definida — algunos cambios no encajan aunque sean correctos técnicamente.
 
-La única excepción son las correcciones de documentación obvias (typos, ejemplos incorrectos). Esas puedes mandarlas directamente como PR.
+La única excepción son correcciones de documentación obvias. Esas puedes mandarlas
+directamente como PR.
 
 ---
 
@@ -20,32 +23,33 @@ La única excepción son las correcciones de documentación obvias (typos, ejemp
 git clone https://github.com/tu-usuario/dramaturge
 cd dramaturge
 npm install
-npm run dev
+npm run dev        # editor en /dev/editor.html, juego en localhost:5173/
+npm test           # suite de tests con Vitest
+npm run test:watch # modo watch para desarrollo
 ```
 
-La DB se puebla automáticamente en el primer arranque desde `seed.js`.  
-`npm run dev` abre el editor en `/dev/editor.html`. El juego está en `localhost:5173/`.
+La DB se puebla automáticamente en el primer arranque desde `seed.js`.
 
 ---
 
 ## Qué PRs se aceptan
 
 ### Sin Issue previo
-- Correcciones de documentación (`KOEDAN.md`, `WORKFLOW.md`, `README.md`)
+- Correcciones de documentación
 - Bugs con reproducción clara y fix acotado
 - Mejoras a las herramientas de desarrollo (`/dev/`)
 - Nuevas instrucciones Koedan siguiendo el patrón de tres archivos
-- Mejoras de accesibilidad
+- Nuevos tests
 
-### Requieren Issue y confirmación primero
+### Requieren Issue y confirmación
 - Nuevos tipos de puzzle
 - Cambios al schema de la DB
 - Cambios al sistema de audio
-- Cualquier cambio en los métodos de avance de `Engine.js`
+- Cambios al ciclo de avance de `Engine.js` o `InstructionExecutor.js`
 - Cambios de diseño visual
 
 ### No se aceptan
-- Introducción de frameworks (React, Vue, Svelte…) en el motor
+- Frameworks en el motor (React, Vue, Svelte…)
 - Migración a TypeScript sin coordinación previa
 - Cambios de paleta, fuentes o layout del juego
 - Dependencias nuevas sin discusión previa
@@ -54,45 +58,148 @@ La DB se puebla automáticamente en el primer arranque desde `seed.js`.
 
 ## Añadir una instrucción al lenguaje Koedan
 
-Siempre son exactamente tres archivos, en este orden:
+Siempre son exactamente **tres archivos**, en este orden:
 
 ```
-src/core/parser/Grammar.js   ← regex con named groups (?<nombre>)
-src/core/parser/Parser.js    ← { regex: KDN_GRAMMAR.NUEVA, type: 'NUEVA' }
-src/core/Engine.js           ← case 'NUEVA': { ... await this._nextInternal(); break; }
+src/core/parser/Grammar.js        ← regex con named groups (?<nombre>)
+src/core/parser/Parser.js         ← entrada en PARSE_RULES
+src/core/InstructionExecutor.js   ← entrada en #buildHandlerMap() + método privado
 ```
 
-Y si el cambio afecta el lenguaje → actualizar `docs/KOEDAN.md` en el mismo PR.
+Ejemplo completo para una instrucción hipotética `fx_rain`:
+
+**Grammar.js:**
+```js
+FX_RAIN: /^fx\s+rain\s+(?<intensity>light|heavy)(?:\s+(?<duration>\d+(?:\.\d+)?(?:s|ms)))?/,
+```
+
+**Parser.js:**
+```js
+{ regex: KDN_GRAMMAR.FX_RAIN, type: 'FX_RAIN' },
+```
+
+**InstructionExecutor.js — en `#buildHandlerMap()`:**
+```js
+['FX_RAIN', (i) => this.#handleFxRain(i)],
+```
+
+**InstructionExecutor.js — método privado:**
+```js
+async #handleFxRain(instruction) {
+    await this.#renderer.fxRain(instruction.intensity, parseDurationMs(instruction.duration));
+    await this.#hooks.advance();
+}
+```
+
+Si la instrucción cambia el lenguaje → actualizar `docs/KOEDAN.md` en el mismo PR.
 
 ---
 
-## La regla más importante del Engine
+## La regla más importante del executor
 
-Los métodos internos de `Engine.js` siempre llaman `_nextInternal()`, **nunca `next()` público**.
+Todos los handlers de `InstructionExecutor` deben terminar llamando
+**exactamente una** de estas dos funciones:
 
-Si un `case` nuevo llama `next()`, el re-entrancy guard descarta la llamada silenciosamente. El juego se cuelga en esa instrucción sin ningún error visible en consola. Es el bug más difícil de diagnosticar del motor.
+```js
+await this.#hooks.advance();        // ejecutar la instrucción siguiente
+await this.#hooks.jumpTo(index);    // saltar a índice y continuar
+```
+
+**Nunca llamar `engine.next()`** desde el executor — el re-entrancy guard
+lo descartará silenciosamente y el juego se quedará colgado en esa instrucción
+sin ningún error visible en consola. Es el bug más difícil de diagnosticar.
+
+Para instrucciones bloqueantes (diálogo, narración, puzzle), el handler
+llama `hooks.setBlocked(true)` y NO llama `advance()` — la reanudación
+ocurre cuando el jugador hace clic y `engine.next()` se llama desde fuera.
+
+```js
+// Patrón correcto para instrucción bloqueante:
+async #handleDialogue(instruction) {
+    this.#hooks.setBlocked(true);
+    await this.#renderer.typewriter(name, text, () => {
+        this.#hooks.setBlocked(false);
+        this.#hooks.onTextComplete();  // ← esto programa el siguiente avance
+    });
+    // No hay hooks.advance() aquí — el avance viene del clic del jugador
+}
+```
+
+---
+
+## Tests
+
+El proyecto usa **Vitest**. Los archivos de test viven en `tests/`.
+
+Para añadir tests de una instrucción nueva:
+
+```js
+// tests/InstructionExecutor.test.js — añadir al describe correspondiente
+it('FX_RAIN llama renderer.fxRain con los parámetros correctos', async () => {
+    const { executor, renderer } = createExecutor();
+    await executor.dispatch({ type: 'FX_RAIN', intensity: 'heavy', duration: '2s' });
+    expect(renderer.fxRain).toHaveBeenCalledWith('heavy', 2000);
+});
+```
+
+Los mocks de hooks y renderer están en el mismo archivo — reutilizar
+`createExecutor()` y `createMockHooks()` en lugar de crear nuevos.
+
+Para instrucciones que evalúan condiciones, añadir casos en
+`tests/ConditionEvaluator.test.js`.
+
+---
+
+## Añadir un panel nuevo al MenuSystem
+
+Los paneles (`SlotPanel`, `AudioPanel`, etc.) siguen un contrato común:
+- `mount(parentElement)` — insertar en el DOM, llamar una sola vez
+- `open(...)` — mostrar con datos frescos
+- `hide()` — ocultar sin destruir
+- `get isOpen()` — estado actual
+
+Para añadir un panel nuevo:
+
+1. Crear `src/modules/panels/MiPanel.js` siguiendo ese contrato
+2. Instanciarlo en `MenuSystem.#mountPanels()`
+3. Añadirlo a `MenuSystem.#handleEscapeKey()` con su `isOpen`
+4. Bindearlo en los eventos correspondientes con `this.#bindClick()`
+
+`#handleEscapeKey()` cierra paneles en orden de prioridad visual —
+el más encima primero. El nuevo panel va en el lugar correcto de esa cadena.
 
 ---
 
 ## Modificar la base de datos
 
-Si el cambio añade o modifica una tabla en `db.js`, **siempre añadir `version(N+1)`**. Nunca modificar una versión ya publicada — Dexie no sabe reconciliarla y puede corromper la DB de usuarios existentes.
+Si el cambio añade o modifica una tabla, **siempre añadir `version(N+1)`**.
+Nunca modificar una versión ya publicada.
 
 ```js
-// Bien — añadir versión nueva
+// Correcto — nueva versión
 db.version(4).stores({
     characters: 'id, name',
     puzzles:    'puzzleId, type',
     saves:      'slotId, savedAt',
     gallery:    'id, unlockedAt',
-    nueva:      'id, campo',   // ← nueva tabla
-});
-
-// Mal — modificar versión existente
-db.version(3).stores({        // ← nunca tocar versiones ya publicadas
-    ...
+    nueva:      'id, campo',
 });
 ```
+
+---
+
+## Sistema de animaciones en Renderer
+
+Hay tres casos. Cada efecto nuevo va en el que le corresponde:
+
+```
+¿Objeto PixiJS? (Sprite, Container, stage)   → app.ticker.add(tick)
+¿Elemento DOM con transición?                 → element.animate().finished
+¿Texto carácter a carácter?                  → requestAnimationFrame
+```
+
+Las curvas de easing están centralizadas en el objeto `EASING` al inicio
+de `Renderer.js`. Usar esas curvas — no definir nuevas inline.
 
 ---
 
@@ -100,37 +207,39 @@ db.version(3).stores({        // ← nunca tocar versiones ya publicadas
 
 | Elemento | Convención | Ejemplo |
 |---|---|---|
-| Clases | `PascalCase` | `AudioManager`, `SceneManager` |
-| Métodos privados | `_guiónBajo` | `_nextInternal()`, `_buildGalleryPanel()` |
-| Constantes | `UPPER_SNAKE` | `FADE_MS`, `SLOT_X` |
+| Clases | `PascalCase` | `AudioManager`, `InstructionExecutor` |
+| Campos privados | `#camelCase` | `#db`, `#handlers`, `#twRafId` |
+| Métodos privados | `#camelCase` | `#advance()`, `#buildHandlerMap()` |
+| Constantes de módulo | `UPPER_SNAKE` | `FADE_MS`, `EASING`, `SLOT_X` |
 | Tipos de instrucción Koedan | `UPPER_SNAKE` | `SPRITE_SHOW`, `BG_CHANGE` |
 
-Sin frameworks. Sin TypeScript por ahora. DOM puro tanto en el motor como en las herramientas dev.
+Sin frameworks. Sin TypeScript por ahora. DOM puro en motor y herramientas dev.
 
 ---
 
 ## Formato de commits
 
 ```
-feat(parser): añadir instrucción fx shake
-fix(audio): ducking no se restaura si audio no tiene evento ended
-docs(koedan): documentar sintaxis de fx
-refactor(renderer): extraer _positionSprite a método separado
-test(engine): añadir caso de prueba para COND_JUMP anidado
+feat(executor): añadir instrucción fx_rain
+fix(renderer): fxFlash no resuelve si CSS deshabilitado
+docs(koedan): documentar sintaxis de fx_rain
+refactor(engine): extraer #onTextLineComplete
+test(executor): añadir casos para FX_RAIN
 ```
 
 `tipo(módulo): descripción en minúsculas`. Tipos: `feat` `fix` `docs` `refactor` `test`.
 
-Un commit por cambio lógico. Si el PR tiene diez commits de "fix", considera hacer squash antes de enviarlo.
+Un commit por cambio lógico. Un PR por feature — no mezclar cambios no relacionados.
 
 ---
 
 ## Abrir el PR
 
-- Rama desde `main` con nombre descriptivo: `feat/fx-shake`, `fix/audio-duck-restore`, `docs/koedan-fx`
-- Un PR por cambio — no mezclar features no relacionadas en el mismo PR
-- Rellena el template del PR — especialmente la sección "Cómo probarlo"
-- Si toca el lenguaje o el workflow → actualizar `docs/KOEDAN.md` o `WORKFLOW.md` en el mismo PR
+- Rama desde `main`: `feat/fx-rain`, `fix/renderer-flash`, `docs/arquitectura`
+- Rellena el template — especialmente "Cómo probarlo"
+- Si toca el lenguaje → actualizar `docs/KOEDAN.md` en el mismo PR
+- Si toca el workflow de assets → actualizar `WORKFLOW.md` en el mismo PR
+- Si añade tabla o modifica schema → versión incrementada en `db.js`
 
 ---
 
@@ -138,7 +247,7 @@ Un commit por cambio lógico. Si el PR tiene diez commits de "fix", considera ha
 
 Antes de tocar código, leer lo que corresponda:
 
-- [`KOEDAN.md`](docs/KOEDAN.md) — lenguaje de scripting completo
-- [`ARQUITECTURA.md`](docs/ARQUITECTURA.md) — módulos, flujo de ejecución, z-index, schema DB
-- [`WORKFLOW.md`](docs/WORKFLOW.md) — assets, personajes, seed
-- [`TODO.md`](docs/TODO.md) — roadmap activo con sintaxis propuesta para cada feature pendiente
+- [`KOEDAN.md`](KOEDAN.md) — lenguaje de scripting completo
+- [`ARQUITECTURA.md`](ARQUITECTURA.md) — módulos, flujo, sistema de animaciones
+- [`WORKFLOW.md`](WORKFLOW.md) — assets, personajes, seed
+- [`TODO.md`](TODO.md) — roadmap activo

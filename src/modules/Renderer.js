@@ -2,47 +2,70 @@
 //
 // ARQUITECTURA DE CAPAS:
 //   [PixiJS canvas]  → fondos y sprites        (z-index 5)
-//   [DOM overlay]    → textbox, nombre, UI      (z-index 30+)
+//   [DOM overlays]   → flash, viñeta, textbox  (z-index 15-30+)
 //
-// CICLO DE VIDA OBLIGATORIO:
+// REGLA DE ANIMACIONES — tres casos, sin excepciones:
+//   Objeto PixiJS (sprite, fondo, stage, capa)  → app.ticker.add(tick)
+//   Elemento DOM con transición                  → element.animate().finished  [WAAPI]
+//   Texto carácter a carácter                   → requestAnimationFrame
+//
+// Esta regla define dónde va cada efecto nuevo. No hay un cuarto caso.
+//
+// CICLO DE VIDA:
 //   const renderer = new Renderer();
-//   await renderer.init();   ← llamar antes que cualquier otro método
+//   await renderer.init();   ← todos los overlays DOM se crean aquí, no lazy
 //
 // API PÚBLICA HACIA ENGINE:
-//   activateInstantMode()   → Engine lo llama antes de texto en modo skip
-//   get isSkipLocked        → Engine lo consulta para proteger el avance
-//   applyNarrationMode(on)  → Engine lo llama al restaurar estado desde save
-//
-// CONVENCIÓN DE CAMPOS:
-//   #campo              → completamente privado, no accesible desde fuera
-//   campo (sin #)       → público — Engine lo necesita directamente
-//                         (nameEl, textEl, textBox, transition, activeSprites,
-//                          bgCurrent, app, isTransitioning)
+//   activateInstantMode()   → Engine llama antes de texto en modo skip
+//   get isSkipLocked        → Engine consulta para proteger el avance
+//   applyNarrationMode(on)  → Engine llama al restaurar estado desde save
 
 import { Application, Assets, Sprite, Container } from 'pixi.js';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-/** Posición X normalizada (0–1) de cada slot de sprite. */
+/** Posición X normalizada de cada slot de sprite en pantalla. */
 const SLOT_X = Object.freeze({ left: 0.20, center: 0.50, right: 0.80 });
 
-/** Formatos probados en orden de preferencia al cargar imágenes. */
+/** Formatos de imagen probados en orden de preferencia. */
 const IMAGE_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 
 /** Altura máxima de un sprite como fracción de la pantalla. */
 const SPRITE_HEIGHT_RATIO = 0.82;
 
-/** Duración por defecto de fades en ms. */
-const FADE_MS = 500;
-
 /** Ms entre caracteres en el typewriter. */
 const TYPEWRITER_CHAR_MS = 28;
+
+/** Duración por defecto de fades PixiJS en ms. */
+const FADE_MS = 500;
+
+/**
+ * Curvas de easing centralizadas.
+ *
+ * Usadas por todos los métodos de animación — cambiar aquí afecta
+ * a todos los efectos del motor de forma coherente.
+ *
+ * Formato: string CSS cubic-bezier compatible con WAAPI y documentado
+ * con su nombre semántico para que los colaboradores entiendan la intención.
+ *
+ * Para animaciones PixiJS (Ticker), las curvas equivalentes están
+ * implementadas como funciones en #applyEase().
+ */
+const EASING = Object.freeze({
+    linear:    'linear',
+    easeIn:    'cubic-bezier(0.4, 0, 1, 1)',      // aceleración suave — entradas
+    easeOut:   'cubic-bezier(0, 0, 0.2, 1)',      // desaceleración suave — salidas, movimiento natural
+    easeInOut: 'cubic-bezier(0.4, 0, 0.2, 1)',    // simétrico — fundidos de modo
+    snap:      'cubic-bezier(0.4, 0, 0.6, 1)',    // rápido al inicio, suave al final — flashes
+});
 
 // ─── Helpers de módulo ────────────────────────────────────────────────────────
 
 /**
  * Carga una textura probando formatos en orden de preferencia.
  * Si el path ya tiene extensión conocida, la intenta primero.
+ *
+ * PixiJS Assets necesita extensión explícita para seleccionar el parser correcto.
  *
  * @param   {string} path — con o sin extensión ('v_idle.webp' | 'v_idle')
  * @returns {Promise<import('pixi.js').Texture|null>}
@@ -56,16 +79,35 @@ async function loadTexture(path) {
 
     for (const fmt of order) {
         try { return await Assets.load(`${base}.${fmt}`); }
-        catch { /* continuar con el siguiente */ }
+        catch { /* continuar con el siguiente formato */ }
     }
     return null;
+}
+
+/**
+ * Aplica una curva de easing a un valor t normalizado (0–1) para animaciones Ticker.
+ * Equivalente a las curvas de EASING pero como función matemática.
+ *
+ * @param {number} t       — progreso normalizado 0–1
+ * @param {string} easing  — nombre de clave de EASING
+ * @returns {number}       — valor eased 0–1
+ */
+function applyEase(t, easing = 'easeOut') {
+    switch (easing) {
+        case 'linear':    return t;
+        case 'easeIn':    return t * t;
+        case 'easeOut':   return 1 - Math.pow(1 - t, 3);       // cubic ease-out
+        case 'easeInOut': return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+        case 'snap':      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        default:          return t;
+    }
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
 
 export class Renderer {
 
-    // ── PixiJS — públicos (Engine y SceneManager los necesitan) ───────────
+    // ── PixiJS — públicos ──────────────────────────────────────────────────
 
     /** @type {import('pixi.js').Application} */
     app;
@@ -79,7 +121,7 @@ export class Renderer {
     /** @type {import('pixi.js').Sprite|null} */
     bgCurrent = null;
 
-    /** @type {Map<string, import('pixi.js').Sprite>} — actorId → sprite activo */
+    /** @type {Map<string, import('pixi.js').Sprite>} */
     activeSprites;
 
     // ── DOM — públicos (Engine actualiza textbox directamente) ────────────
@@ -89,7 +131,7 @@ export class Renderer {
     /** @type {HTMLElement} */ textBox;
     /** @type {HTMLElement} */ transition;
 
-    // ── Estado de transición — público (Engine lo respeta en next()) ──────
+    // ── Estado de transición — público ────────────────────────────────────
 
     /**
      * True mientras se ejecuta una transición de modo (narración ↔ diálogo).
@@ -100,7 +142,7 @@ export class Renderer {
 
     // ── Typewriter — privado ───────────────────────────────────────────────
 
-    /** @type {number|null} — handle del rAF activo */
+    /** @type {number|null} */
     #twRafId = null;
 
     /** @type {string} */
@@ -122,19 +164,27 @@ export class Renderer {
     #instantModeActive = false;
 
     /**
-     * Bloqueo post-skip: protege contra avance involuntario tras completar
-     * texto por skip. Leer via getter isSkipLocked.
+     * Bloqueo post-skip. Leer via getter isSkipLocked.
      * @type {boolean}
      */
     #skipLocked = false;
 
-    // ── Elementos DOM internos (creados en init()) ────────────────────────
+    // ── Elementos DOM — todos creados en init(), no lazy ──────────────────
+    //
+    // REGLA: ningún método crea elementos DOM en su primera llamada.
+    //        Todos los overlays existen desde init() y se reutilizan.
 
     /** @type {HTMLElement|null} */
     #advanceIndicator = null;
 
+    /** @type {HTMLElement|null} — overlay para fxFlash */
+    #flashOverlay = null;
+
+    /** @type {HTMLElement|null} — overlay para fxVignette */
+    #vignetteOverlay = null;
+
     constructor() {
-        this.app          = new Application();
+        this.app           = new Application();
         this.activeSprites = new Map();
         this.nameEl     = document.getElementById('char-name');
         this.textEl     = document.getElementById('char-text');
@@ -144,6 +194,7 @@ export class Renderer {
 
     // ─────────────────────────────────────────────────────────────────────────
     // INICIALIZACIÓN
+    // Todos los elementos DOM y overlays se crean aquí — nunca en el primer uso.
     // ─────────────────────────────────────────────────────────────────────────
 
     async init() {
@@ -159,7 +210,6 @@ export class Renderer {
 
         const canvas = this.app.canvas;
         canvas.style.cssText = 'position:absolute;inset:0;z-index:5;';
-
         viewport.insertBefore(canvas, viewport.querySelector('#click-zone'));
 
         this.bgLayer     = new Container();
@@ -168,17 +218,43 @@ export class Renderer {
 
         this.app.renderer.on('resize', () => this.#onResize());
 
+        // Indicador ▼ — parpadea cuando el typewriter termina
         this.#advanceIndicator = document.createElement('span');
         this.#advanceIndicator.id          = 'advance-indicator';
         this.#advanceIndicator.textContent = '▼';
         this.textBox?.appendChild(this.#advanceIndicator);
+
+        // Overlay de flash — creado aquí, reutilizado en cada fxFlash()
+        this.#flashOverlay = document.createElement('div');
+        this.#flashOverlay.id = 'fx-flash-overlay';
+        Object.assign(this.#flashOverlay.style, {
+            position:      'absolute',
+            inset:         '0',
+            zIndex:        '20',
+            pointerEvents: 'none',
+            opacity:       '0',
+            background:    '#000000',
+        });
+        viewport.appendChild(this.#flashOverlay);
+
+        // Overlay de viñeta — creado aquí, reutilizado en cada fxVignette()
+        this.#vignetteOverlay = document.createElement('div');
+        this.#vignetteOverlay.id = 'fx-vignette-overlay';
+        Object.assign(this.#vignetteOverlay.style, {
+            position:      'absolute',
+            inset:         '0',
+            zIndex:        '15',
+            pointerEvents: 'none',
+            opacity:       '0',
+            background:    'radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.72) 100%)',
+        });
+        viewport.appendChild(this.#vignetteOverlay);
 
         console.log('[Renderer] PixiJS v8 inicializado.');
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // API PÚBLICA — modos de avance
-    // (contrato con Engine — no acceder a los campos # directamente)
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -191,8 +267,7 @@ export class Renderer {
     }
 
     /**
-     * True si el skip-lock está activo. Engine lo consulta para ignorar
-     * el input durante el breve periodo de protección post-skip.
+     * True si el skip-lock está activo. Engine lo consulta en next().
      * @returns {boolean}
      */
     get isSkipLocked() {
@@ -200,7 +275,7 @@ export class Renderer {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SPRITES
+    // SPRITES — Ticker (objetos PixiJS)
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -226,12 +301,12 @@ export class Renderer {
         this.activeSprites.set(actor, sprite);
 
         if (effect === 'fade') {
-            await this.#fadeIn(sprite);
+            await this.#tickerFadeIn(sprite);
         } else if (effect === 'slide') {
             sprite.y += 50;
             await Promise.all([
-                this.#fadeIn(sprite),
-                this.#moveTo(sprite, sprite.x, sprite.y - 50),
+                this.#tickerFadeIn(sprite),
+                this.#tickerMoveTo(sprite, sprite.x, sprite.y - 50),
             ]);
         } else {
             sprite.alpha = 1;
@@ -246,12 +321,12 @@ export class Renderer {
     async hideSprite(actor, slot, effect = 'fade') {
         const sprite = this.activeSprites.get(actor);
         if (!sprite) return;
-        if (effect === 'fade') await this.#fadeOut(sprite);
+        if (effect === 'fade') await this.#tickerFadeOut(sprite);
         this.#destroySprite(actor);
     }
 
     /**
-     * Cambia la textura del sprite activo de un actor (cambio de pose).
+     * Cambia la textura de un sprite activo (cambio de pose).
      * @param {string} actor
      * @param {string} path
      */
@@ -260,15 +335,17 @@ export class Renderer {
         if (!sprite) return;
 
         const texture = await loadTexture(path);
-        if (!texture) { console.warn(`[Renderer] updateSprite: no encontrado ${path}`); return; }
-
+        if (!texture) {
+            console.warn(`[Renderer] updateSprite: no encontrado ${path}`);
+            return;
+        }
         sprite.texture = texture;
         const targetH  = this.app.screen.height * SPRITE_HEIGHT_RATIO;
         sprite.scale.set(targetH / sprite.texture.height);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // FONDO
+    // FONDO — Ticker (objeto PixiJS)
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -292,7 +369,7 @@ export class Renderer {
         newBg.height   = this.app.screen.height;
         this.bgLayer.addChild(newBg);
 
-        if (effect === 'fade') await this.#fadeIn(newBg, ms);
+        if (effect === 'fade') await this.#tickerFadeIn(newBg, ms);
         else newBg.alpha = 1;
 
         if (this.bgCurrent) this.bgCurrent.destroy();
@@ -300,15 +377,13 @@ export class Renderer {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // TYPEWRITER
+    // TYPEWRITER — rAF (texto carácter a carácter)
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Inicia el efecto typewriter para una línea de texto.
-     *
-     * @param {string|null} name   — nombre del personaje, o null para narración
-     * @param {string}      text   — texto completo a escribir
-     * @param {Function}    onDone — llamado cuando el jugador puede avanzar
+     * @param {string|null} name   — nombre del personaje, null para narración
+     * @param {string}      text
+     * @param {Function}    onDone
      */
     async typewriter(name, text, onDone) {
         this.#twFullText = text;
@@ -324,17 +399,15 @@ export class Renderer {
         await this.applyNarrationMode(isNarration);
         this.nameEl.innerText = isNarration ? '' : name;
 
-        // Modo instantáneo (skip): completar sin animación
         if (this.#instantModeActive) {
             this.#instantModeActive = false;
             this.textEl.innerText   = text;
             this.#twComplete        = true;
-            this.#setAdvance(false); // en skip no se muestra el ▼
+            this.#setAdvance(false);
             this.#twCallback?.();
             return;
         }
 
-        // rAF typewriter — velocidad consistente independiente del hardware
         let charIndex  = 0;
         let lastTime   = null;
         let accumulated = 0;
@@ -365,8 +438,7 @@ export class Renderer {
     }
 
     /**
-     * Completa el texto instantáneamente si el typewriter está en curso.
-     * Aplica skip-lock breve para evitar doble-avance accidental.
+     * Completa el typewriter instantáneamente con skip-lock breve.
      */
     skipTypewriter() {
         if (this.#twComplete) return;
@@ -396,19 +468,21 @@ export class Renderer {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Aplica el modo visual narración / diálogo al textbox.
+     * Aplica el modo visual narración / diálogo.
      * Llamado desde typewriter() y desde Engine.resumeFromState().
+     *
+     * spriteLayer.alpha se anima con el Ticker — es un objeto PixiJS.
      *
      * @param {boolean} active — true = narración, false = diálogo
      */
     applyNarrationMode(active) {
         this.textBox.classList.toggle('narration-mode', active);
-        this.#tweenSpriteAlpha(active ? 0.15 : 1, 200);
+        this.#tickerTweenAlpha(this.spriteLayer, active ? 0.15 : 1, 200);
     }
 
     /**
      * Transición con crossfade entre modo narración y diálogo.
-     * Si el modo no cambia, resuelve inmediatamente.
+     * Usa WAAPI para el overlay DOM. El spriteLayer usa el Ticker.
      *
      * @param {boolean} toNarration
      * @param {number}  [fadeMs]
@@ -422,34 +496,139 @@ export class Renderer {
 
         this.isTransitioning = true;
 
-        overlay.style.background = '#000000';
-        overlay.style.transition = `opacity ${fadeMs}ms ease-in`;
-        overlay.classList.add('active');
+        // ── Fase 1: Fade a negro — WAAPI (overlay DOM) ────────────────────
+        await overlay.animate(
+            [{ opacity: 0 }, { opacity: 1 }],
+            { duration: fadeMs, easing: EASING.easeIn, fill: 'forwards' }
+        ).finished;
 
-        await new Promise(resolve => {
-            requestAnimationFrame(() => {
-                overlay.style.opacity = '1';
-                setTimeout(resolve, fadeMs);
-            });
-        });
-
+        // ── Pantalla en negro: preparar todo de golpe ──────────────────────
         cancelAnimationFrame(this.#twRafId);
         this.#twRafId = null;
         if (this.textEl) this.textEl.innerText = '';
         if (this.nameEl) this.nameEl.innerText = '';
         this.#setAdvance(false);
-        this.textBox.classList.toggle('narration-mode', toNarration);
-        this.#tweenSpriteAlpha(toNarration ? 0.15 : 1, fadeMs * 2);
 
-        overlay.style.transition = `opacity ${fadeMs * 1.8}ms ease-out`;
-        requestAnimationFrame(() => { overlay.style.opacity = '0'; });
-        setTimeout(() => {
-            overlay.classList.remove('active');
-            overlay.style.transition = '';
-            overlay.style.background = '';
-        }, fadeMs * 1.8 + 20);
+        this.textBox.classList.toggle('narration-mode', toNarration);
+
+        // spriteLayer es un objeto PixiJS — usa el Ticker
+        this.#tickerTweenAlpha(this.spriteLayer, toNarration ? 0.15 : 1, fadeMs * 2);
+
+        // ── Fase 2: Fade-out en background — WAAPI, sin await ─────────────
+        // El typewriter arranca solapado con el reveal — sensación de una acción.
+        overlay.animate(
+            [{ opacity: 1 }, { opacity: 0 }],
+            { duration: fadeMs * 1.8, easing: EASING.easeOut, fill: 'forwards' }
+        );
 
         this.isTransitioning = false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRANSICIÓN DE ESCENA — WAAPI (overlay DOM)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fade fullscreen entre escenas.
+     * @param {'black'|'white'} color
+     * @param {number}          ms — duración de cada mitad
+     */
+    async sceneTransition(color = 'black', ms = 500) {
+        const overlay = this.transition;
+        if (!overlay) return;
+
+        overlay.style.background = color === 'white' ? '#fff' : '#000';
+
+        await overlay.animate(
+            [{ opacity: 0 }, { opacity: 1 }],
+            { duration: ms, easing: EASING.easeIn, fill: 'forwards' }
+        ).finished;
+
+        // Pausa breve en color sólido — corte narrativo perceptible
+        await new Promise(r => setTimeout(r, 80));
+
+        await overlay.animate(
+            [{ opacity: 1 }, { opacity: 0 }],
+            { duration: ms, easing: EASING.easeOut, fill: 'forwards' }
+        ).finished;
+
+        // Limpiar fill: 'forwards' para no dejar estilos inline residuales
+        overlay.style.opacity = '';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EFECTOS DE PANTALLA
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Sacude el stage lateralmente.
+     * Stage es un objeto PixiJS — usa el Ticker.
+     * Bloquea hasta que termina.
+     *
+     * @param {number} durationMs
+     */
+    fxShake(durationMs) {
+        return new Promise(resolve => {
+            const stage     = this.app.stage;
+            const originX   = stage.x;
+            const originY   = stage.y;
+            const intensity = 8;
+            const start     = performance.now();
+
+            const tick = () => {
+                const t   = Math.min((performance.now() - start) / durationMs, 1);
+                const amp = intensity * (1 - t); // decay lineal
+
+                stage.x = originX + (Math.random() * 2 - 1) * amp;
+                stage.y = originY + (Math.random() * 2 - 1) * amp * 0.5;
+
+                if (t >= 1) {
+                    stage.x = originX;
+                    stage.y = originY;
+                    this.app.ticker.remove(tick);
+                    resolve();
+                }
+            };
+            this.app.ticker.add(tick);
+        });
+    }
+
+    /**
+     * Flash de color sobre toda la pantalla.
+     * Usa WAAPI sobre el overlay DOM creado en init().
+     * Bloquea hasta que desaparece.
+     *
+     * @param {'white'|'black'} color
+     * @param {number}          durationMs — ciclo completo (in + out)
+     */
+    async fxFlash(color, durationMs) {
+        this.#flashOverlay.style.background = color === 'white' ? '#ffffff' : '#000000';
+        const half = durationMs / 2;
+
+        await this.#flashOverlay.animate(
+            [{ opacity: 0 }, { opacity: 1 }],
+            { duration: half, easing: EASING.snap, fill: 'forwards' }
+        ).finished;
+
+        await this.#flashOverlay.animate(
+            [{ opacity: 1 }, { opacity: 0 }],
+            { duration: half, easing: EASING.easeOut, fill: 'forwards' }
+        ).finished;
+
+        this.#flashOverlay.style.opacity = '';
+    }
+
+    /**
+     * Activa o desactiva la viñeta (oscurecimiento de bordes).
+     * Usa WAAPI sobre el overlay DOM creado en init(). No bloquea.
+     *
+     * @param {boolean} active
+     */
+    fxVignette(active) {
+        this.#vignetteOverlay.animate(
+            [{ opacity: active ? 0 : 1 }, { opacity: active ? 1 : 0 }],
+            { duration: 500, easing: EASING.easeInOut, fill: 'forwards' }
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -458,7 +637,7 @@ export class Renderer {
 
     /**
      * Vacía sprites, fondo y textbox sin destruir la app PixiJS.
-     * Llamar desde Engine.reset().
+     * Llamado desde Engine.reset().
      */
     clearScene() {
         for (const sprite of this.activeSprites.values()) {
@@ -483,39 +662,6 @@ export class Renderer {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // TRANSICIÓN DE ESCENA
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * Fade fullscreen entre escenas (goto fade:black / fade:white).
-     * @param {'black'|'white'} color
-     * @param {number}          ms
-     */
-    async sceneTransition(color = 'black', ms = 500) {
-        const overlay = this.transition;
-        if (!overlay) return;
-
-        overlay.style.background = color === 'white' ? '#fff' : '#000';
-        overlay.style.transition = `opacity ${ms}ms ease`;
-        overlay.classList.add('active');
-
-        await new Promise(resolve => {
-            requestAnimationFrame(() => {
-                overlay.style.opacity = '1';
-                setTimeout(resolve, ms);
-            });
-        });
-
-        await new Promise(r => setTimeout(r, 80));
-
-        overlay.style.opacity = '0';
-        await new Promise(r => setTimeout(r, ms));
-
-        overlay.classList.remove('active');
-        overlay.style.transition = '';
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // CURSOR
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -533,91 +679,97 @@ export class Renderer {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // EFECTOS DE PANTALLA
+    // PRIVADO — Ticker (animaciones sobre objetos PixiJS)
+    // Regla: estos métodos solo tocan objetos con .alpha, .x, .y — nunca DOM.
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Sacude el stage lateralmente. Bloquea hasta que termina.
-     * @param {number} durationMs
+     * Anima alpha de 0 a 1 usando el Ticker.
+     * @param {object} obj — Sprite u objeto PixiJS con propiedad alpha
+     * @param {number} [ms]
      */
-    fxShake(durationMs) {
+    #tickerFadeIn(obj, ms = FADE_MS) {
         return new Promise(resolve => {
-            const stage     = this.app.stage;
-            const originX   = stage.x;
-            const originY   = stage.y;
-            const intensity = 8;
-            const start     = performance.now();
-
-            const tick = () => {
-                const t       = Math.min((performance.now() - start) / durationMs, 1);
-                const amp     = intensity * (1 - t);
-                stage.x       = originX + (Math.random() * 2 - 1) * amp;
-                stage.y       = originY + (Math.random() * 2 - 1) * amp * 0.5;
-
-                if (t >= 1) {
-                    stage.x = originX;
-                    stage.y = originY;
-                    this.app.ticker.remove(tick);
-                    resolve();
-                }
+            obj.alpha   = 0;
+            const start = performance.now();
+            const tick  = () => {
+                const t   = Math.min((performance.now() - start) / ms, 1);
+                obj.alpha = applyEase(t, 'easeOut');
+                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
             };
             this.app.ticker.add(tick);
         });
     }
 
     /**
-     * Flash de color (fade in + fade out). Bloquea hasta que desaparece.
-     * @param {'white'|'black'} color
-     * @param {number}          durationMs — ciclo completo
+     * Anima alpha de su valor actual a 0 usando el Ticker.
+     * @param {object} obj
+     * @param {number} [ms]
      */
-    fxFlash(color, durationMs) {
+    #tickerFadeOut(obj, ms = FADE_MS) {
         return new Promise(resolve => {
-            let overlay = document.getElementById('fx-flash-overlay');
-            if (!overlay) {
-                overlay = document.createElement('div');
-                overlay.id = 'fx-flash-overlay';
-                Object.assign(overlay.style, {
-                    position: 'absolute', inset: '0', zIndex: '20',
-                    pointerEvents: 'none', opacity: '0',
-                });
-                document.getElementById('viewport')?.appendChild(overlay);
-            }
-
-            const half = durationMs / 2;
-            overlay.style.background = color === 'white' ? '#ffffff' : '#000000';
-            overlay.style.transition = `opacity ${half}ms ease`;
-            overlay.style.opacity    = '0';
-            void overlay.offsetHeight;
-            overlay.style.opacity = '1';
-
-            setTimeout(() => {
-                overlay.style.opacity = '0';
-                setTimeout(resolve, half);
-            }, half);
+            const startAlpha = obj.alpha;
+            const start      = performance.now();
+            const tick       = () => {
+                const t   = Math.min((performance.now() - start) / ms, 1);
+                obj.alpha = startAlpha * (1 - applyEase(t, 'easeOut'));
+                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
+            };
+            this.app.ticker.add(tick);
         });
     }
 
     /**
-     * Activa o desactiva viñeta sobre el canvas. No bloquea.
-     * @param {boolean} active
+     * Mueve un objeto PixiJS hacia coordenadas destino usando el Ticker.
+     * @param {object} obj
+     * @param {number} targetX
+     * @param {number} targetY
+     * @param {number} [ms]
      */
-    fxVignette(active) {
-        let el = document.getElementById('fx-vignette-overlay');
-        if (!el) {
-            el = document.createElement('div');
-            el.id = 'fx-vignette-overlay';
-            Object.assign(el.style, {
-                position: 'absolute', inset: '0', zIndex: '15',
-                pointerEvents: 'none', opacity: '0', transition: 'opacity 0.5s ease',
-                background: 'radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.72) 100%)',
-            });
-            document.getElementById('viewport')?.appendChild(el);
-        }
-        el.style.opacity = active ? '1' : '0';
+    #tickerMoveTo(obj, targetX, targetY, ms = FADE_MS) {
+        return new Promise(resolve => {
+            const sx = obj.x;
+            const sy = obj.y;
+            const start = performance.now();
+            const tick  = () => {
+                const t  = Math.min((performance.now() - start) / ms, 1);
+                const e  = applyEase(t, 'easeOut');
+                obj.x    = sx + (targetX - sx) * e;
+                obj.y    = sy + (targetY - sy) * e;
+                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
+            };
+            this.app.ticker.add(tick);
+        });
+    }
+
+    /**
+     * Anima el alpha de cualquier objeto PixiJS hacia un valor destino.
+     * No bloquea — la siguiente instrucción se ejecuta inmediatamente.
+     *
+     * Corrección respecto a la versión anterior: usaba rAF directamente
+     * para modificar una propiedad PixiJS, creando frames donde el render
+     * ocurría antes de que el alpha se actualizara. Ahora usa el Ticker,
+     * que se ejecuta sincronizado con el loop de render de PixiJS.
+     *
+     * @param {object} pixiObject — objeto con propiedad alpha (Sprite, Container…)
+     * @param {number} target     — 0.0–1.0
+     * @param {number} ms
+     */
+    #tickerTweenAlpha(pixiObject, target, ms) {
+        const startAlpha = pixiObject.alpha;
+        const delta      = target - startAlpha;
+        const startTime  = performance.now();
+
+        const tick = () => {
+            const t = Math.min((performance.now() - startTime) / ms, 1);
+            pixiObject.alpha = startAlpha + delta * applyEase(t, 'easeInOut');
+            if (t >= 1) this.app.ticker.remove(tick);
+        };
+        this.app.ticker.add(tick);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // PRIVADO
+    // PRIVADO — utilidades
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -662,81 +814,5 @@ export class Renderer {
     /** @param {boolean} visible */
     #setAdvance(visible) {
         this.#advanceIndicator?.classList.toggle('visible', visible);
-    }
-
-    /**
-     * Anima el alpha del spriteLayer con ease in-out cuadrático.
-     * @param {number} target — 0.0–1.0
-     * @param {number} ms
-     */
-    #tweenSpriteAlpha(target, ms) {
-        const start     = this.spriteLayer.alpha;
-        const delta     = target - start;
-        const startTime = performance.now();
-
-        const tick = (now) => {
-            const t    = Math.min((now - startTime) / ms, 1);
-            const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-            this.spriteLayer.alpha = start + delta * ease;
-            if (t < 1) requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-    }
-
-    /**
-     * @param {object} obj — Sprite u objeto PixiJS con alpha
-     * @param {number} [ms]
-     */
-    #fadeIn(obj, ms = FADE_MS) {
-        return new Promise(resolve => {
-            obj.alpha   = 0;
-            const start = performance.now();
-            const tick  = () => {
-                const t   = Math.min((performance.now() - start) / ms, 1);
-                obj.alpha = t;
-                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
-            };
-            this.app.ticker.add(tick);
-        });
-    }
-
-    /**
-     * @param {object} obj
-     * @param {number} [ms]
-     */
-    #fadeOut(obj, ms = FADE_MS) {
-        return new Promise(resolve => {
-            const startAlpha = obj.alpha;
-            const start      = performance.now();
-            const tick       = () => {
-                const t   = Math.min((performance.now() - start) / ms, 1);
-                obj.alpha = startAlpha * (1 - t);
-                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
-            };
-            this.app.ticker.add(tick);
-        });
-    }
-
-    /**
-     * Ease-out cúbico — movimientos naturales.
-     * @param {object} obj
-     * @param {number} targetX
-     * @param {number} targetY
-     * @param {number} [ms]
-     */
-    #moveTo(obj, targetX, targetY, ms = FADE_MS) {
-        return new Promise(resolve => {
-            const sx = obj.x;
-            const sy = obj.y;
-            const start = performance.now();
-            const tick  = () => {
-                const t    = Math.min((performance.now() - start) / ms, 1);
-                const ease = 1 - Math.pow(1 - t, 3);
-                obj.x      = sx + (targetX - sx) * ease;
-                obj.y      = sy + (targetY - sy) * ease;
-                if (t >= 1) { this.app.ticker.remove(tick); resolve(); }
-            };
-            this.app.ticker.add(tick);
-        });
     }
 }
